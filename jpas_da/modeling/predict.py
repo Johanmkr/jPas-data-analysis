@@ -22,23 +22,16 @@ from jpas_da.config import MODELS_DIR, PROCESSED_DATA_DIR
 from jpas_da.modeling import data as model_data
 from jpas_da.modeling.losses import get_loss
 from jpas_da.modeling.train import resolve_device
-from jpas_da.modeling.vae import VAE, normalise_shape
+from jpas_da.modeling.vae import build_model, normalise_shape
 
 app = typer.Typer()
 
 PREDICTIONS_FILE = PROCESSED_DATA_DIR / "vae_latents.parquet"
 
 
-def load_checkpoint(path: Path, device: torch.device) -> tuple[VAE, dict]:
+def load_checkpoint(path: Path, device: torch.device) -> tuple[torch.nn.Module, dict]:
     checkpoint = torch.load(path, map_location=device, weights_only=False)
-    spec = checkpoint["model"]
-    model = VAE(
-        n_bands=spec["n_bands"],
-        n_channels=spec["n_channels"],
-        latent_dim=spec["latent_dim"],
-        hidden=tuple(spec["hidden"]),
-        scale_head=spec["scale_head"],
-    ).to(device)
+    model = build_model(checkpoint["model"]).to(device)
     model.load_state_dict(checkpoint["state_dict"])
     model.eval()
     return model, checkpoint

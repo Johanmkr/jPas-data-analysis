@@ -114,6 +114,9 @@ Adding a loss is one function in `jpas_da/modeling/losses.py` plus its key in
 `LOSSES`; a new channel is one entry in `jpas_da/modeling/data.py` and in
 `CHANNELS`. Changing either never touches the model or the training loop.
 
+Architecture defaults live only in `jpas_da/modeling/config.py`; `build_model`
+takes every value explicitly, so training and inference cannot disagree.
+
 Training writes `models/vae.pt` (weights, architecture, noise floor and the
 resolved config) and `reports/metrics.json` (per-epoch history, final losses).
 

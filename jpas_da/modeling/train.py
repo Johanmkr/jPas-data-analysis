@@ -28,7 +28,7 @@ from jpas_da.config import PROJ_ROOT
 from jpas_da.modeling import data as model_data
 from jpas_da.modeling.config import Config, dump_config, load_config
 from jpas_da.modeling.losses import get_loss
-from jpas_da.modeling.vae import VAE, normalise_shape
+from jpas_da.modeling.vae import VAE, build_model, normalise_shape
 
 app = typer.Typer()
 
@@ -213,14 +213,16 @@ def main(
     )
 
     n_bands = int(arrays["n_bands"])
-    model = VAE(
-        n_bands=n_bands,
-        n_channels=len(config.model.channels),
-        latent_dim=config.model.latent_dim,
-        hidden=config.model.hidden,
-        kernel_size=config.model.kernel_size,
-        scale_head=config.model.scale_head,
-        dropout=config.model.dropout,
+    model = build_model(
+        {
+            "n_bands": n_bands,
+            "n_channels": len(config.model.channels),
+            "latent_dim": config.model.latent_dim,
+            "hidden": config.model.hidden,
+            "kernel_size": config.model.kernel_size,
+            "scale_head": config.model.scale_head,
+            "dropout": config.model.dropout,
+        }
     ).to(device)
     loss_fn = get_loss(config.loss.name)
     optimiser = torch.optim.AdamW(
@@ -303,7 +305,9 @@ def main(
                 "n_channels": len(config.model.channels),
                 "latent_dim": config.model.latent_dim,
                 "hidden": list(config.model.hidden),
+                "kernel_size": config.model.kernel_size,
                 "scale_head": config.model.scale_head,
+                "dropout": config.model.dropout,
             },
             "channels": list(config.model.channels),
             "s_floor": s_floor.cpu(),

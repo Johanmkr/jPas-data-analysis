@@ -110,13 +110,14 @@ class VAE(nn.Module):
     def __init__(
         self,
         n_bands: int,
-        n_channels: int = 3,
-        latent_dim: int = 6,
-        hidden: tuple[int, ...] = (256, 128),
-        kernel_size: int = 5,
-        scale_head: bool = True,
-        dropout: float = 0.0,
+        n_channels: int,
+        latent_dim: int,
+        hidden: tuple[int, ...],
+        kernel_size: int,
+        scale_head: bool,
+        dropout: float,
     ) -> None:
+        """All architectural values are required: defaults live in ModelConfig only."""
         super().__init__()
         if not hidden:
             raise ValueError("hidden must contain at least one width")
@@ -151,3 +152,20 @@ def normalise_shape(mu: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     mu = mu * mask
     norm = mu.norm(dim=-1, keepdim=True).clamp_min(1e-12)
     return mu / norm
+
+
+def build_model(spec: dict) -> VAE:
+    """Construct a :class:`VAE` from a config mapping or a checkpoint's spec.
+
+    Both training and inference go through here, so a checkpoint can only be
+    restored with the architecture it was trained with.
+    """
+    return VAE(
+        n_bands=int(spec["n_bands"]),
+        n_channels=int(spec["n_channels"]),
+        latent_dim=int(spec["latent_dim"]),
+        hidden=tuple(int(width) for width in spec["hidden"]),
+        kernel_size=int(spec["kernel_size"]),
+        scale_head=bool(spec["scale_head"]),
+        dropout=float(spec.get("dropout", 0.0)),
+    )

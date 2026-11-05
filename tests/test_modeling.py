@@ -16,7 +16,7 @@ import yaml
 from jpas_da.modeling import data as model_data
 from jpas_da.modeling.config import Config, load_config
 from jpas_da.modeling.losses import LOSSES, get_loss
-from jpas_da.modeling.vae import VAE, normalise_shape
+from jpas_da.modeling.vae import build_model, normalise_shape
 
 N_BANDS = 12
 
@@ -166,12 +166,41 @@ def batch():
     return g, v, mask, s_floor
 
 
+def _spec(**overrides):
+    spec = {
+        "n_bands": N_BANDS,
+        "n_channels": 3,
+        "latent_dim": 3,
+        "hidden": (16, 8),
+        "kernel_size": 5,
+        "scale_head": True,
+        "dropout": 0.0,
+    }
+    spec.update(overrides)
+    return spec
+
+
 def test_encoder_accepts_every_channel_subset():
     for channels in (("g",), ("g", "v"), ("g", "v", "mask")):
-        model = VAE(n_bands=N_BANDS, n_channels=len(channels), latent_dim=3, hidden=(16, 8))
+        model = build_model(_spec(n_channels=len(channels)))
         out = model(torch.zeros(4, len(channels), N_BANDS))
         assert out["mu_z"].shape == (4, 3)
         assert out["mu_g"].shape == (4, N_BANDS)
+
+
+def test_checkpoint_spec_cannot_be_loaded_into_a_different_architecture():
+    """The spec alone decides the architecture, so a mismatched rebuild fails."""
+    trained = build_model(_spec(kernel_size=3, latent_dim=5, hidden=(12,)))
+    matching = build_model(_spec(kernel_size=3, latent_dim=5, hidden=(12,)))
+    matching.load_state_dict(trained.state_dict())
+
+    wrong_width = build_model(_spec(kernel_size=3, latent_dim=5, hidden=(13,)))
+    with pytest.raises(RuntimeError):
+        wrong_width.load_state_dict(trained.state_dict())
+
+    wrong_latent = build_model(_spec(kernel_size=3, latent_dim=4, hidden=(12,)))
+    with pytest.raises(RuntimeError):
+        wrong_latent.load_state_dict(trained.state_dict())
 
 
 def test_normalised_shape_lies_on_the_sphere_over_the_mask(batch):
