@@ -16,6 +16,7 @@ classifiers = [
     "License :: OSI Approved :: MIT License"
 ]
 dependencies = [
+    "altair>=6.2.2",
     "loguru",
     "mkdocs",
     "pandas",
@@ -48,3 +49,6 @@ dev = [
     "marimo>=0.25.2",
 ]
 
+
+[tool.marimo.runtime]
+pythonpath = ["."]

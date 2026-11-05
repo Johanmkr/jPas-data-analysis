@@ -59,3 +59,17 @@ Analysing the jpas dataset using data science methods and machine learning techn
 
 --------
 
+
+## Notebooks
+
+Launch marimo through the project environment, never a bare `marimo`/`uvx marimo`:
+
+```bash
+uv run marimo edit notebooks/explore_data.py
+# or
+make notebook NOTEBOOK=notebooks/explore_data.py
+```
+
+`uv run` puts `jpas_da` and the project dependencies on the kernel's path;
+`tool.marimo.runtime.pythonpath` in `pyproject.toml` covers the package when the
+editable install is missing.

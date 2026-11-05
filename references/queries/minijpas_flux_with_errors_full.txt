@@ -1,0 +1,98 @@
+SELECT
+t1.tile_id as tile_id, t1.number as number,
+t1.ALPHA_J2000 as ALPHA_J2000, t1.DELTA_J2000 as DELTA_J2000,
+
+t1.FLUX_AUTO[minijpas::uJAVA] as uJAVA, t1.FLUX_AUTO[minijpas::J0378] as J0378,
+t1.FLUX_AUTO[minijpas::J0390] as J0390, t1.FLUX_AUTO[minijpas::J0400] as J0400,
+t1.FLUX_AUTO[minijpas::J0410] as J0410, t1.FLUX_AUTO[minijpas::J0420] as J0420,
+t1.FLUX_AUTO[minijpas::J0430] as J0430, t1.FLUX_AUTO[minijpas::J0440] as J0440,
+t1.FLUX_AUTO[minijpas::J0450] as J0450, t1.FLUX_AUTO[minijpas::J0460] as J0460,
+t1.FLUX_AUTO[minijpas::J0470] as J0470, t1.FLUX_AUTO[minijpas::J0480] as J0480,
+t1.FLUX_AUTO[minijpas::J0490] as J0490, t1.FLUX_AUTO[minijpas::J0500] as J0500,
+t1.FLUX_AUTO[minijpas::J0510] as J0510, t1.FLUX_AUTO[minijpas::J0520] as J0520,
+t1.FLUX_AUTO[minijpas::J0530] as J0530, t1.FLUX_AUTO[minijpas::J0540] as J0540,
+t1.FLUX_AUTO[minijpas::J0550] as J0550, t1.FLUX_AUTO[minijpas::J0560] as J0560,
+t1.FLUX_AUTO[minijpas::J0570] as J0570, t1.FLUX_AUTO[minijpas::J0580] as J0580,
+t1.FLUX_AUTO[minijpas::J0590] as J0590, t1.FLUX_AUTO[minijpas::J0600] as J0600,
+t1.FLUX_AUTO[minijpas::J0610] as J0610, t1.FLUX_AUTO[minijpas::J0620] as J0620,
+t1.FLUX_AUTO[minijpas::J0630] as J0630, t1.FLUX_AUTO[minijpas::J0640] as J0640,
+t1.FLUX_AUTO[minijpas::J0650] as J0650, t1.FLUX_AUTO[minijpas::J0660] as J0660,
+t1.FLUX_AUTO[minijpas::J0670] as J0670, t1.FLUX_AUTO[minijpas::J0680] as J0680,
+t1.FLUX_AUTO[minijpas::J0690] as J0690, t1.FLUX_AUTO[minijpas::J0700] as J0700,
+t1.FLUX_AUTO[minijpas::J0710] as J0710, t1.FLUX_AUTO[minijpas::J0720] as J0720,
+t1.FLUX_AUTO[minijpas::J0730] as J0730, t1.FLUX_AUTO[minijpas::J0740] as J0740,
+t1.FLUX_AUTO[minijpas::J0750] as J0750, t1.FLUX_AUTO[minijpas::J0760] as J0760,
+t1.FLUX_AUTO[minijpas::J0770] as J0770, t1.FLUX_AUTO[minijpas::J0780] as J0780,
+t1.FLUX_AUTO[minijpas::J0790] as J0790, t1.FLUX_AUTO[minijpas::J0800] as J0800,
+t1.FLUX_AUTO[minijpas::J0810] as J0810, t1.FLUX_AUTO[minijpas::J0820] as J0820,
+t1.FLUX_AUTO[minijpas::J0830] as J0830, t1.FLUX_AUTO[minijpas::J0840] as J0840,
+t1.FLUX_AUTO[minijpas::J0850] as J0850, t1.FLUX_AUTO[minijpas::J0860] as J0860,
+t1.FLUX_AUTO[minijpas::J0870] as J0870, t1.FLUX_AUTO[minijpas::J0880] as J0880,
+t1.FLUX_AUTO[minijpas::J0890] as J0890, t1.FLUX_AUTO[minijpas::J0900] as J0900,
+t1.FLUX_AUTO[minijpas::J0910] as J0910, t1.FLUX_AUTO[minijpas::J1007] as J1007,
+t1.FLUX_AUTO[minijpas::uJPAS] as uJPAS, t1.FLUX_AUTO[minijpas::gSDSS] as gSDSS,
+t1.FLUX_AUTO[minijpas::rSDSS] as rSDSS, t1.FLUX_AUTO[minijpas::iSDSS] as iSDSS,
+
+t1.FLUX_RELERR_AUTO[minijpas::uJAVA] as euJAVA, t1.FLUX_RELERR_AUTO[minijpas::J0378] as eJ0378,
+t1.FLUX_RELERR_AUTO[minijpas::J0390] as eJ0390, t1.FLUX_RELERR_AUTO[minijpas::J0400] as eJ0400,
+t1.FLUX_RELERR_AUTO[minijpas::J0410] as eJ0410, t1.FLUX_RELERR_AUTO[minijpas::J0420] as eJ0420,
+t1.FLUX_RELERR_AUTO[minijpas::J0430] as eJ0430, t1.FLUX_RELERR_AUTO[minijpas::J0440] as eJ0440,
+t1.FLUX_RELERR_AUTO[minijpas::J0450] as eJ0450, t1.FLUX_RELERR_AUTO[minijpas::J0460] as eJ0460,
+t1.FLUX_RELERR_AUTO[minijpas::J0470] as eJ0470, t1.FLUX_RELERR_AUTO[minijpas::J0480] as eJ0480,
+t1.FLUX_RELERR_AUTO[minijpas::J0490] as eJ0490, t1.FLUX_RELERR_AUTO[minijpas::J0500] as eJ0500,
+t1.FLUX_RELERR_AUTO[minijpas::J0510] as eJ0510, t1.FLUX_RELERR_AUTO[minijpas::J0520] as eJ0520,
+t1.FLUX_RELERR_AUTO[minijpas::J0530] as eJ0530, t1.FLUX_RELERR_AUTO[minijpas::J0540] as eJ0540,
+t1.FLUX_RELERR_AUTO[minijpas::J0550] as eJ0550, t1.FLUX_RELERR_AUTO[minijpas::J0560] as eJ0560,
+t1.FLUX_RELERR_AUTO[minijpas::J0570] as eJ0570, t1.FLUX_RELERR_AUTO[minijpas::J0580] as eJ0580,
+t1.FLUX_RELERR_AUTO[minijpas::J0590] as eJ0590, t1.FLUX_RELERR_AUTO[minijpas::J0600] as eJ0600,
+t1.FLUX_RELERR_AUTO[minijpas::J0610] as eJ0610, t1.FLUX_RELERR_AUTO[minijpas::J0620] as eJ0620,
+t1.FLUX_RELERR_AUTO[minijpas::J0630] as eJ0630, t1.FLUX_RELERR_AUTO[minijpas::J0640] as eJ0640,
+t1.FLUX_RELERR_AUTO[minijpas::J0650] as eJ0650, t1.FLUX_RELERR_AUTO[minijpas::J0660] as eJ0660,
+t1.FLUX_RELERR_AUTO[minijpas::J0670] as eJ0670, t1.FLUX_RELERR_AUTO[minijpas::J0680] as eJ0680,
+t1.FLUX_RELERR_AUTO[minijpas::J0690] as eJ0690, t1.FLUX_RELERR_AUTO[minijpas::J0700] as eJ0700,
+t1.FLUX_RELERR_AUTO[minijpas::J0710] as eJ0710, t1.FLUX_RELERR_AUTO[minijpas::J0720] as eJ0720,
+t1.FLUX_RELERR_AUTO[minijpas::J0730] as eJ0730, t1.FLUX_RELERR_AUTO[minijpas::J0740] as eJ0740,
+t1.FLUX_RELERR_AUTO[minijpas::J0750] as eJ0750, t1.FLUX_RELERR_AUTO[minijpas::J0760] as eJ0760,
+t1.FLUX_RELERR_AUTO[minijpas::J0770] as eJ0770, t1.FLUX_RELERR_AUTO[minijpas::J0780] as eJ0780,
+t1.FLUX_RELERR_AUTO[minijpas::J0790] as eJ0790, t1.FLUX_RELERR_AUTO[minijpas::J0800] as eJ0800,
+t1.FLUX_RELERR_AUTO[minijpas::J0810] as eJ0810, t1.FLUX_RELERR_AUTO[minijpas::J0820] as eJ0820,
+t1.FLUX_RELERR_AUTO[minijpas::J0830] as eJ0830, t1.FLUX_RELERR_AUTO[minijpas::J0840] as eJ0840,
+t1.FLUX_RELERR_AUTO[minijpas::J0850] as eJ0850, t1.FLUX_RELERR_AUTO[minijpas::J0860] as eJ0860,
+t1.FLUX_RELERR_AUTO[minijpas::J0870] as eJ0870, t1.FLUX_RELERR_AUTO[minijpas::J0880] as eJ0880,
+t1.FLUX_RELERR_AUTO[minijpas::J0890] as eJ0890, t1.FLUX_RELERR_AUTO[minijpas::J0900] as eJ0900,
+t1.FLUX_RELERR_AUTO[minijpas::J0910] as eJ0910, t1.FLUX_RELERR_AUTO[minijpas::J1007] as eJ1007,
+t1.FLUX_RELERR_AUTO[minijpas::uJPAS] as euJPAS, t1.FLUX_RELERR_AUTO[minijpas::gSDSS] as egSDSS,
+t1.FLUX_RELERR_AUTO[minijpas::rSDSS] as erSDSS, t1.FLUX_RELERR_AUTO[minijpas::iSDSS] as eiSDSS,
+
+t3.MAG_AUTO[minijpas::rSDSS] as MAGrSDSS,
+t3.flags[minijpas::rSDSS] as flag_rSDSS,
+t3.mask_flags[minijpas::rSDSS] as mask_flag_rSDSS,
+
+t1.CLASS_STAR as SEtractor,
+
+t2.class as photoCLASSsdss,
+t2.spCl as spCLASSsdss,
+
+t2.zsp as zsp,
+t2.e_zsp as e_zsp,
+t2.f_zsp,
+t2.zph as zph,
+t2.e_zph as e_zph,
+t2.avg_zph as avg_zph,
+
+t2.angDist as angDist
+
+FROM
+minijpas.FLambdaDualObj t1
+
+LEFT JOIN
+minijpas.xmatch_sdss_dr12 t2
+
+ON
+t1.tile_id = t2.tile_id AND t1.number = t2.number
+
+JOIN
+minijpas.MagABDualObj t3
+
+ON
+t1.tile_id = t3.tile_id AND t1.number = t3.number

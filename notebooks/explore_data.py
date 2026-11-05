@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.25.2"
+__generated_with = "0.23.8"
 app = marimo.App(width="medium")
 
 
@@ -15,29 +15,37 @@ def _():
     from jpas_da.bands import BANDS, BAND_NAMES, BLOCK_ORDER
     from jpas_da.config import INTERIM_DATA_DIR
 
-    return BANDS, BAND_NAMES, BLOCK_ORDER, INTERIM_DATA_DIR, alt, features, mo, np, pd
+    return (
+        BANDS,
+        BAND_NAMES,
+        BLOCK_ORDER,
+        INTERIM_DATA_DIR,
+        alt,
+        features,
+        mo,
+        np,
+        pd,
+    )
 
 
 @app.cell(hide_code=True)
 def _(mo):
-    mo.md(
-        r"""
-        # The training data: what the VAE sees
+    mo.md(r"""
+    # The training data: what the VAE sees
 
-        Everything below reads the pipeline artifacts, never the 75 MB CSV:
+    Everything below reads the pipeline artifacts, never the 75 MB CSV:
 
-        | Artifact | Built by | Holds |
-        |---|---|---|
-        | `data/interim/objects.parquet` | `make data` | one row per object: raw flux, absolute sigma, validity mask, metadata |
-        | `data/interim/band_scales.parquet` | `make data` | per-band soft scale `b_j` |
-        | `data/processed/jpas_asinh.parquet` | `make features` | the model input `x`, its uncertainty `sigma_x`, the mask |
-        | `data/interim/folds.parquet` | `make splits` | leave-one-tile-out fold per object |
+    | Artifact | Built by | Holds |
+    |---|---|---|
+    | `data/interim/objects.parquet` | `make data` | one row per object: raw flux, absolute sigma, validity mask, metadata |
+    | `data/interim/band_scales.parquet` | `make data` | per-band soft scale `b_j` |
+    | `data/processed/jpas_asinh.parquet` | `make features` | the model input `x`, its uncertainty `sigma_x`, the mask |
+    | `data/interim/folds.parquet` | `make splits` | leave-one-tile-out fold per object |
 
-        The model is trained on **flux and uncertainty only**. Labels (`zsp`,
-        `zph`, `spCLASSsdss`, `photoCLASSsdss`) and position/metadata columns are
-        carried alongside for inference and diagnostics, never fed in.
-        """
-    )
+    The model is trained on **flux and uncertainty only**. Labels (`zsp`,
+    `zph`, `spCLASSsdss`, `photoCLASSsdss`) and position/metadata columns are
+    carried alongside for inference and diagnostics, never fed in.
+    """)
     return
 
 
@@ -69,7 +77,7 @@ def _(BAND_NAMES, INTERIM_DATA_DIR, features, mo, pd):
         | folds | {len(set(arrays["fold"].tolist()))} |
         """
     )
-    return arrays, n_bands, n_masked_pixels, n_objects, objects, scales
+    return arrays, scales
 
 
 @app.cell
@@ -80,7 +88,7 @@ def _(arrays):
     fold = arrays["fold"]
     object_id = arrays["object_id"]
     tile_id = arrays["tile_id"]
-    return fold, mask, object_id, sigma_x, tile_id, x
+    return fold, mask, sigma_x, tile_id, x
 
 
 @app.cell
@@ -88,26 +96,25 @@ def _(np, scales):
     b_j_values = scales["b_j"].to_numpy(dtype=np.float64)
     return (b_j_values,)
 
+
 @app.cell
 def _(BAND_NAMES, mo):
-    mo.md(
-        f"""
-        ### How to load it
+    mo.md(f"""
+    ### How to load it
 
-        ```python
-        from jpas_da.features import load_arrays
+    ```python
+    from jpas_da.features import load_arrays
 
-        a = load_arrays()          # -> dict of arrays
-        x, sigma_x, mask = a["x"], a["sigma_x"], a["mask"]
-        fold = a["fold"]           # leave-one-tile-out assignment
-        ```
+    a = load_arrays()          # -> dict of arrays
+    x, sigma_x, mask = a["x"], a["sigma_x"], a["mask"]
+    fold = a["fold"]           # leave-one-tile-out assignment
+    ```
 
-        `x` and `sigma_x` are `float32` of shape `(n_objects, {len(BAND_NAMES)})`,
-        `mask` is `int8`. **Band order is canonical and identical in all three
-        arrays** - it comes from `jpas_da.bands.BAND_NAMES`, so no column matching
-        is needed and no ordering can drift.
-        """
-    )
+    `x` and `sigma_x` are `float32` of shape `(n_objects, {len(BAND_NAMES)})`,
+    `mask` is `int8`. **Band order is canonical and identical in all three
+    arrays** - it comes from `jpas_da.bands.BAND_NAMES`, so no column matching
+    is needed and no ordering can drift.
+    """)
     return
 
 
@@ -403,7 +410,7 @@ def _(BAND_NAMES, INTERIM_DATA_DIR, alt, mask, mo, np, pd, sigma_x):
 
 
 @app.cell
-def _(INTERIM_DATA_DIR, mask, mo, np, pd, sigma_x, x):
+def _(INTERIM_DATA_DIR, mo, np, pd, sigma_x, x):
     labels = pd.read_parquet(
         INTERIM_DATA_DIR / "objects.parquet", columns=["object_id", "spCLASSsdss", "zph"]
     )
@@ -431,11 +438,23 @@ def _(INTERIM_DATA_DIR, mask, mo, np, pd, sigma_x, x):
             f"({n_detected[candidate]} bands at SNR>=5)"
         ] = candidate
     picker = mo.ui.dropdown(options=choices, value=next(iter(choices)), label="object")
-    return labels, n_detected, picker
+    return labels, picker
 
 
 @app.cell
-def _(BAND_NAMES, alt, b_j_values, labels, mask, mo, np, pd, picker, sigma_x, x):
+def _(
+    BAND_NAMES,
+    alt,
+    b_j_values,
+    labels,
+    mask,
+    mo,
+    np,
+    pd,
+    picker,
+    sigma_x,
+    x,
+):
     chosen = picker.value
     in_x = x[chosen].astype(np.float64)
     object_frame = pd.DataFrame(
@@ -516,7 +535,7 @@ def _(BAND_NAMES, alt, b_j_values, labels, mask, mo, np, pd, picker, sigma_x, x)
 
 
 @app.cell
-def _(BAND_NAMES, alt, mask, mo, np, pd):
+def _(BAND_NAMES, alt, mask, mo, pd):
     masked_per_band = pd.DataFrame(
         {"band": list(BAND_NAMES), "masked_fraction": 1.0 - mask.mean(axis=0)}
     )
@@ -648,41 +667,39 @@ def _(fold, mo, np, tile_id):
 
 @app.cell
 def _(mo):
-    mo.md(
-        r"""
-        ## 10. Feeding it to the VAE
+    mo.md(r"""
+    ## 10. Feeding it to the VAE
 
-        ```python
-        a = load_arrays()
-        x, sigma_x, mask = a["x"], a["sigma_x"], a["mask"]
-        train = a["fold"] != k
+    ```python
+    a = load_arrays()
+    x, sigma_x, mask = a["x"], a["sigma_x"], a["mask"]
+    train = a["fold"] != k
 
-        # 60 flux channels + 60 mask channels -> 120 inputs
-        inputs = np.concatenate([x[train], mask[train].astype("float32")], axis=1)
+    # 60 flux channels + 60 mask channels -> 120 inputs
+    inputs = np.concatenate([x[train], mask[train].astype("float32")], axis=1)
 
-        # heteroscedastic Gaussian likelihood, measured pixels only
-        valid = mask[train] == 1
-        noise = sigma_x[train] ** 2
-        loss = ((rec - x[train]) ** 2 / (2 * noise) + np.log(sigma_x[train]))[valid].mean()
-        ```
+    # heteroscedastic Gaussian likelihood, measured pixels only
+    valid = mask[train] == 1
+    noise = sigma_x[train] ** 2
+    loss = ((rec - x[train]) ** 2 / (2 * noise) + np.log(sigma_x[train]))[valid].mean()
+    ```
 
-        The pipeline already guarantees:
+    The pipeline already guarantees:
 
-        | requirement | where it is enforced |
-        |---|---|
-        | finite inputs, no NaN in `x` | `features.build_representation` raises otherwise |
-        | `sigma_x` defined exactly where `mask == 1` | asserted at build time and in `tests/test_data.py` |
-        | canonical band order | `jpas_da.bands.BAND_NAMES`, a single definition |
-        | exact invertibility | `features.check_roundtrip`, run on every build |
-        | no label leakage | labels live in `objects.parquet`; `x` holds 60 flux channels and nothing else |
-        | no train/test leak | `folds.parquet`, one fold per pointing |
+    | requirement | where it is enforced |
+    |---|---|
+    | finite inputs, no NaN in `x` | `features.build_representation` raises otherwise |
+    | `sigma_x` defined exactly where `mask == 1` | asserted at build time and in `tests/test_data.py` |
+    | canonical band order | `jpas_da.bands.BAND_NAMES`, a single definition |
+    | exact invertibility | `features.check_roundtrip`, run on every build |
+    | no label leakage | labels live in `objects.parquet`; `x` holds 60 flux channels and nothing else |
+    | no train/test leak | `folds.parquet`, one fold per pointing |
 
-        **Do not** feed `MAGrSDSS` (exactly `26.1147 - 2.5*log10(rSDSS)`), `angDist`
-        (non-null exactly on the SDSS-cross-matched rows), or any of
-        `zsp`/`zph`/`avg_zph`/`spCLASSsdss`/`photoCLASSsdss`. All are kept in the
-        interim table for later inference; none belongs in `x`.
-        """
-    )
+    **Do not** feed `MAGrSDSS` (exactly `26.1147 - 2.5*log10(rSDSS)`), `angDist`
+    (non-null exactly on the SDSS-cross-matched rows), or any of
+    `zsp`/`zph`/`avg_zph`/`spCLASSsdss`/`photoCLASSsdss`. All are kept in the
+    interim table for later inference; none belongs in `x`.
+    """)
     return
 
 

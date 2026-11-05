@@ -85,6 +85,12 @@ splits: data
 datasets: features splits
 
 
+## Open the marimo notebook inside the project environment
+.PHONY: notebook
+notebook: requirements
+	uv run marimo edit $(NOTEBOOK)
+
+
 #################################################################################
 # Self Documenting Commands                                                     #
 #################################################################################
