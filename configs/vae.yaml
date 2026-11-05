@@ -1,0 +1,47 @@
+# Configuration for the SED-shape VAE.
+#
+# Every value here is a knob with a documented default in
+# jpas_da/modeling/config.py. Override on the command line with
+#   python -m jpas_da.modeling.train --set model.hidden=[64,32]
+# without editing this file.
+#
+# The defaults are the "standard Euclidean VAE" the project starts from: three
+# input channels (shape, its error, validity mask), a six-dimensional latent,
+# a two-layer convolutional encoder, a Gaussian likelihood and a warm-up on the
+# KL weight. Change them once the baseline has been reproduced.
+
+data:
+  path: data/processed/vae_inputs.npz
+  fold: 0
+
+model:
+  channels: [g, v, mask]
+  latent_dim: 6
+  hidden: [256, 128]
+  kernel_size: 5
+  scale_head: true
+  dropout: 0.0
+
+loss:
+  name: gaussian_nll
+  beta: 3.0
+  beta_warmup_fraction: 0.25
+  floor_percentile: 5.0
+  systematic_scale: 0.037
+  student_t_dof: 5.0
+
+train:
+  epochs: 50
+  batch_size: 512
+  learning_rate: 0.001
+  weight_decay: 0.0
+  grad_clip: 0.0
+  seed: 0
+  device: auto
+  debug_objects: 1024
+  debug_epochs: 2
+  log_every: 0
+
+output:
+  model_path: models/vae.pt
+  metrics_path: reports/metrics.json
