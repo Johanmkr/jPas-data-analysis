@@ -49,8 +49,8 @@ class Encoder(nn.Module):
         n_bands: int,
         hidden: tuple[int, ...],
         latent_dim: int,
-        kernel_size: int = 5,
-        dropout: float = 0.0,
+        kernel_size: int,
+        dropout: float,
     ) -> None:
         super().__init__()
         if kernel_size % 2 == 0:
@@ -83,8 +83,8 @@ class Decoder(nn.Module):
         n_bands: int,
         hidden: tuple[int, ...],
         latent_dim: int,
-        scale_head: bool = True,
-        dropout: float = 0.0,
+        scale_head: bool,
+        dropout: float,
     ) -> None:
         super().__init__()
         self.n_bands = n_bands
