@@ -135,8 +135,31 @@ docker run --rm -v "$PWD/data:/app/data" -v "$PWD/models:/app/models" \
 The image installs `make` and the locked environment; `UV_NO_SYNC=1` is set so
 the container never re-resolves dependencies at run time.
 
-For a real run on the cluster, replace the container command with
-`make train` and point the job template at the mounted data directory.
+### Cluster jobs
+
+`cluster/job.yaml.tmpl` is one parametrised Kubernetes Job; `jpas_da/cluster.py`
+fills it in and validates the result, and `make job` writes the manifest to
+`cluster/jobs/` (git-ignored). Rendering never contacts the cluster.
+
+```bash
+make job TARGET=train IMAGE_TAG=$(git rev-parse --short HEAD)
+make job TARGET=train-debug GPU_COUNT=0      # CPU smoke job
+kubectl apply -f cluster/jobs/train-<sha>.yaml   # your call, not the pipeline's
+```
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `IMAGE` | `jpas-da:<git sha>` | image to run, tagged so the pod runs the built code |
+| `TARGET` | `train` | the single make target executed in the container |
+| `GPU_COUNT` | `1` | `0` omits the `nvidia.com/gpu` limit entirely |
+| `CPU` / `MEMORY` | `4` / `16Gi` | requests and limits |
+| `PVC` / `NAMESPACE` | `jpas-storage` / `default` | where data and outputs live |
+
+The job mounts the claim at `/app/data` (the pipeline inputs), and writes
+`models/<job>` and `reports/<job>` so concurrent runs cannot overwrite each
+other. `WANDB_API_KEY` is pulled from the `wandb-api` secret when it exists; the
+pipeline does not need it. `make submit`, `make job-logs` and `make job-delete`
+wrap the matching `kubectl` calls.
 
 --------
 

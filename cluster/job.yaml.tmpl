@@ -1,0 +1,53 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ${JOB_NAME}
+  namespace: ${NAMESPACE}
+  labels:
+    app: jpas-da
+    target: ${TARGET_SAFE}
+spec:
+  backoffLimit: ${BACKOFF_LIMIT}
+  ttlSecondsAfterFinished: ${TTL_SECONDS}
+  template:
+    metadata:
+      labels:
+        app: jpas-da
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: jpas-da
+          image: ${IMAGE}
+          imagePullPolicy: IfNotPresent
+          command: ["make", "${TARGET}"]
+          env:
+            - name: UV_NO_SYNC
+              value: "1"
+            - name: WANDB_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ${WANDB_SECRET}
+                  key: api-key
+                  optional: true
+          resources:
+            requests:
+              cpu: "${CPU}"
+              memory: "${MEMORY}"
+            limits:
+              cpu: "${CPU}"
+              memory: "${MEMORY}"
+              nvidia.com/gpu: "${GPU_COUNT}"
+          volumeMounts:
+            - name: storage
+              mountPath: /app/data
+              subPath: data
+            - name: storage
+              mountPath: /app/models
+              subPath: models/${JOB_NAME}
+            - name: storage
+              mountPath: /app/reports
+              subPath: reports/${JOB_NAME}
+      volumes:
+        - name: storage
+          persistentVolumeClaim:
+            claimName: ${PVC}

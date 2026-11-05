@@ -13,6 +13,12 @@ PYTHON_INTERPRETER ?= uv run python
 CONFIG ?= configs/vae.yaml
 SET ?=
 
+# Cluster job parameters (see cluster/job.yaml.tmpl and `make job`).
+IMAGE_TAG ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
+IMAGE ?= jpas-da:$(IMAGE_TAG)
+TARGET ?= train
+GPU_COUNT ?= 1
+
 #################################################################################
 # COMMANDS                                                                      #
 #################################################################################
@@ -131,6 +137,32 @@ docker-train: docker-build
 		-v "$(CURDIR)/models:/app/models" \
 		-v "$(CURDIR)/reports:/app/reports" \
 		jpas-da:dev make train-debug
+
+
+## Render the cluster Job YAML (writes cluster/jobs/<job>.yaml, not committed)
+.PHONY: job
+job:
+	$(PYTHON_INTERPRETER) -m jpas_da.cluster \
+		--image $(IMAGE) --target $(TARGET) --gpu-count $(GPU_COUNT) \
+		--output cluster/jobs/$(TARGET)-$(IMAGE_TAG).yaml
+
+
+## Submit the rendered Job. Runs on the cluster: only when you ask for it.
+.PHONY: submit
+submit: job
+	kubectl apply -f cluster/jobs/$(TARGET)-$(IMAGE_TAG).yaml
+
+
+## Follow the job's logs
+.PHONY: job-logs
+job-logs:
+	kubectl logs -f job/$(TARGET)-$(IMAGE_TAG)
+
+
+## Delete the job and its pod
+.PHONY: job-delete
+job-delete:
+	kubectl delete job $(TARGET)-$(IMAGE_TAG)
 
 
 ## Run the smoke path: data, debug training, tests

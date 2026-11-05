@@ -192,3 +192,4 @@ cython_debug/
 # Training artefacts (regenerate with `make train`)
 models/*.pt
 reports/metrics.json
+cluster/jobs/
