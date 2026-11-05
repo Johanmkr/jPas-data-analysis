@@ -88,10 +88,7 @@ flowchart LR
 
 ### The model
 
-A standard Gaussian-posterior VAE over the 60-band SED shape. The input is the
-per-object RMS normalisation `g = f / ||f||` with its propagated error `v` and
-the validity mask, so brightness is factored out into `log r` and handled by a
-separate head; `vae-normalisation-and-loss.md` derives why. Everything is a
+A standard Gaussian-posterior VAE over the 60-band SED shape. Everything is a
 knob in `configs/vae.yaml`:
 
 ```yaml
@@ -116,6 +113,34 @@ Adding a loss is one function in `jpas_da/modeling/losses.py` plus its key in
 
 Architecture defaults live only in `jpas_da/modeling/config.py`; `build_model`
 takes every value explicitly, so training and inference cannot disagree.
+
+### Normalisation
+
+Per object, with `f_j` the flux, `sigma_j` its absolute error and `m_j` the
+validity mask (0 where the archive quoted no error):
+
+```text
+r   = sqrt( sum_j f_j^2 m_j )                  # brightness, masked bands excluded
+g_j = f_j / r                                  # shape, unit-norm over m_j = 1
+v_j = sqrt( sigma_j^2 + (0.026 f_j)^2 ) / r    # shape error, zero where m_j = 0
+logr, sig_logr = log r, sqrt( sum_j g_j^2 v_j^2 )
+```
+
+- Dividing flux and error by the same scalar leaves every Gaussian likelihood
+  term invariant, so it is conditioning, not modelling; no sample statistic
+  enters, so it cannot leak across folds.
+- `0.026` is the multiplicative relative-calibration term (~0.028 mag), a
+  survey constant, not fitted here.
+- A masked band is excluded from `r` and gets `v = 0`, never `sigma = 0`: its
+  flux is real but unweighted.
+- The additive per-band floor `s_j` is **not** stored in the arrays. It is a
+  percentile of `v` fitted on the training fold at run time
+  (`loss.floor_percentile`) and fixed, because the quoted error is purely
+  relative and vanishes with the flux.
+
+`vae-normalisation-and-loss.md` has the measurements and derivations behind
+these choices.
+
 
 Training writes `models/vae.pt` (weights, architecture, noise floor and the
 resolved config) and `reports/metrics.json` (per-epoch history, final losses).
