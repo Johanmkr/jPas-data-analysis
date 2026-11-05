@@ -4,7 +4,14 @@
 
 PROJECT_NAME = jpas_da
 PYTHON_VERSION = 3.10
-PYTHON_INTERPRETER = python
+# `uv run` guarantees the project environment regardless of which shell starts
+# make, and is a no-op inside the Docker image (UV_NO_SYNC=1 there).
+PYTHON_INTERPRETER ?= uv run python
+
+# Config file and per-run overrides for the VAE targets, e.g.
+#   make train-debug SET="--set model.hidden=[64,32] --set loss.name=student_t"
+CONFIG ?= configs/vae.yaml
+SET ?=
 
 #################################################################################
 # COMMANDS                                                                      #
@@ -14,7 +21,9 @@ PYTHON_INTERPRETER = python
 ## Install Python dependencies
 .PHONY: requirements
 requirements:
+ifneq ($(UV_NO_SYNC),1)
 	uv sync
+endif
 	
 
 
@@ -43,7 +52,7 @@ format:
 ## Run tests
 .PHONY: test
 test:
-	python -m pytest tests
+	$(PYTHON_INTERPRETER) -m pytest tests
 
 
 ## Set up Python interpreter environment
@@ -84,6 +93,49 @@ splits: data
 .PHONY: datasets
 datasets: features splits
 
+## Model-ready arrays: RMS shape/scale decomposition onto the fold assignment
+.PHONY: model-data
+model-data: datasets
+	$(PYTHON_INTERPRETER) -m jpas_da.modeling.data
+
+
+## Train the VAE (CONFIG and SET override configs/vae.yaml)
+.PHONY: train
+train: model-data
+	$(PYTHON_INTERPRETER) -m jpas_da.modeling.train --config $(CONFIG) $(SET)
+
+
+## Two-epoch run on a small subset, for smoke-testing the pipeline
+.PHONY: train-debug
+train-debug: model-data
+	$(PYTHON_INTERPRETER) -m jpas_da.modeling.train --config $(CONFIG) --debug $(SET)
+
+
+## Encode every object with the trained model
+.PHONY: predict
+predict: train
+	$(PYTHON_INTERPRETER) -m jpas_da.modeling.predict
+
+
+## Build the CPU training image
+.PHONY: docker-build
+docker-build:
+	docker build -t jpas-da:dev .
+
+
+## Run the debug training inside the image, with the host data mounted
+.PHONY: docker-train
+docker-train: docker-build
+	docker run --rm \
+		-v "$(CURDIR)/data:/app/data" \
+		-v "$(CURDIR)/models:/app/models" \
+		-v "$(CURDIR)/reports:/app/reports" \
+		jpas-da:dev make train-debug
+
+
+## Run the smoke path: data, debug training, tests
+.PHONY: smoke
+smoke: train-debug test
 
 ## Open the marimo notebook inside the project environment
 .PHONY: notebook

@@ -22,13 +22,19 @@ dependencies = [
     "pandas",
     "pip",
     "pyarrow>=25.0.1",
+    "pydantic>=2.7",
     "pytest",
     "python-dotenv",
+    "pyyaml>=6.0",
     "ruff",
+    "torch>=2.5",
     "tqdm",
     "typer",
 ]
 requires-python = "~=3.10.0"
+
+# torch is resolved from PyPI (CPU wheel on Linux). On a GPU node install it
+# from the matching CUDA index instead; nothing in the code depends on the build.
 
 
 [tool.ruff]
