@@ -156,8 +156,11 @@ docker run --rm -v "$PWD/data:/app/data" -v "$PWD/models:/app/models" \
   -v "$PWD/reports:/app/reports" jpas-da:dev make train-debug
 ```
 
-The image installs `make` and the locked environment; `UV_NO_SYNC=1` is set so
-the container never re-resolves dependencies at run time.
+The image installs `make`, the test suite and the locked environment;
+`UV_NO_SYNC=1` is set so the container never re-resolves dependencies at run
+time. `make docker-train` is the one check this pipeline cannot run inside the
+sandbox it was developed in (no Docker daemon, no `CAP_SYS_ADMIN`); run it once
+on a host with Docker before trusting the image for a cluster run.
 
 ### Cluster jobs
 
