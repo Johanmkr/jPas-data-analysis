@@ -61,8 +61,9 @@ Analysing the jpas dataset using data science methods and machine learning techn
 
 ## Pipeline
 
-`make data` goes from the immutable raw export to the model-ready arrays; every
-step is rerunnable and writes into `data/`.
+`make data` goes from the immutable raw export to the model-ready arrays under
+`data/processed/`; every step is rerunnable and writes into `data/`. `make train`
+and `make train-debug` depend on it, so a clean checkout needs no manual steps.
 
 ```mermaid
 flowchart LR
@@ -77,9 +78,8 @@ flowchart LR
 
 | Target | What it does |
 |---|---|
-| `make data` | raw export → interim object table and band scales |
-| `make data` (`features`, `splits`) | asinh representation, fold assignment |
-| `make model-data` | RMS shape/scale decomposition → `vae_inputs.npz` |
+| `make data` | raw export → interim table, asinh representation, folds, `vae_inputs.npz` |
+| `make model-data` | just the RMS shape/scale step → `vae_inputs.npz` |
 | `make train` | full training run (`CONFIG=...`, `SET="--set ..."`) |
 | `make train-debug` | 1024 objects, 2 epochs — smoke test |
 | `make predict` | encode every object into `vae_latents.parquet` |

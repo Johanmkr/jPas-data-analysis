@@ -78,26 +78,27 @@ create_environment:
 
 
 ## Raw export -> interim object table (flux, sigma, mask) + band scales
-.PHONY: data
-data: requirements
+.PHONY: interim
+interim: requirements
 	$(PYTHON_INTERPRETER) -m jpas_da.dataset
 
 
 ## Interim object table -> asinh representation (x, sigma_x, mask)
 .PHONY: features
-features: data
+features: interim
 	$(PYTHON_INTERPRETER) -m jpas_da.features
 
 
 ## Leave-one-tile-out fold assignment
 .PHONY: splits
-splits: data
+splits: interim
 	$(PYTHON_INTERPRETER) -m jpas_da.splits
 
 
-## Everything the models need: data, features, splits
+## Everything the models need: interim table, representation, folds
 .PHONY: datasets
 datasets: features splits
+
 
 ## Model-ready arrays: RMS shape/scale decomposition onto the fold assignment
 .PHONY: model-data
@@ -105,15 +106,21 @@ model-data: datasets
 	$(PYTHON_INTERPRETER) -m jpas_da.modeling.data
 
 
+## Raw export -> the final model-ready dataset under data/processed
+.PHONY: data
+data: model-data
+	@echo ">>> data/processed: $$(ls data/processed | tr '\n' ' ')"
+
+
 ## Train the VAE (CONFIG and SET override configs/vae.yaml)
 .PHONY: train
-train: model-data
+train: data
 	$(PYTHON_INTERPRETER) -m jpas_da.modeling.train --config $(CONFIG) $(SET)
 
 
 ## Two-epoch run on a small subset, for smoke-testing the pipeline
 .PHONY: train-debug
-train-debug: model-data
+train-debug: data
 	$(PYTHON_INTERPRETER) -m jpas_da.modeling.train --config $(CONFIG) --debug $(SET)
 
 
