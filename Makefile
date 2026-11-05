@@ -62,10 +62,27 @@ create_environment:
 #################################################################################
 
 
-## Make dataset
+## Raw export -> interim object table (flux, sigma, mask) + band scales
 .PHONY: data
 data: requirements
-	$(PYTHON_INTERPRETER) jpas_da/dataset.py
+	$(PYTHON_INTERPRETER) -m jpas_da.dataset
+
+
+## Interim object table -> asinh representation (x, sigma_x, mask)
+.PHONY: features
+features: data
+	$(PYTHON_INTERPRETER) -m jpas_da.features
+
+
+## Leave-one-tile-out fold assignment
+.PHONY: splits
+splits: data
+	$(PYTHON_INTERPRETER) -m jpas_da.splits
+
+
+## Everything the models need: data, features, splits
+.PHONY: datasets
+datasets: features splits
 
 
 #################################################################################
