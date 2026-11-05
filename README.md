@@ -141,7 +141,6 @@ logr, sig_logr = log r, sqrt( sum_j g_j^2 v_j^2 )
 `vae-normalisation-and-loss.md` has the measurements and derivations behind
 these choices.
 
-
 Training writes `models/vae.pt` (weights, architecture, noise floor and the
 resolved config) and `reports/metrics.json` (per-epoch history, final losses).
 
