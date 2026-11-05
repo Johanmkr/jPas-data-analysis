@@ -132,6 +132,9 @@ docker run --rm -v "$PWD/data:/app/data" -v "$PWD/models:/app/models" \
   -v "$PWD/reports:/app/reports" jpas-da:dev make train-debug
 ```
 
+The image installs `make` and the locked environment; `UV_NO_SYNC=1` is set so
+the container never re-resolves dependencies at run time.
+
 For a real run on the cluster, replace the container command with
 `make train` and point the job template at the mounted data directory.
 

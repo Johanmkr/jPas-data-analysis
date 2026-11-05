@@ -9,6 +9,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     UV_NO_SYNC=1 \
     MPLBACKEND=Agg
 
+# make runs the pipeline targets; the base image has no build tools.
+# https sources so the build also works behind proxies that refuse plain http.
+RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' \
+        /etc/apt/sources.list.d/debian.sources \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends make \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY --from=ghcr.io/astral-sh/uv:0.13 /uv /usr/local/bin/uv
 
 WORKDIR /app
@@ -24,7 +32,9 @@ COPY configs ./configs
 COPY jpas_da ./jpas_da
 RUN uv sync --frozen --no-dev
 
-ENV PATH="/app/.venv/bin:$PATH"
+# `uv run` would try to re-resolve; the image already has the exact environment.
+ENV PATH="/app/.venv/bin:$PATH" \
+    UV_NO_SYNC=1
 
 # The raw export and the derived tables stay outside the image: mount the
 # repository's data directory, e.g.
