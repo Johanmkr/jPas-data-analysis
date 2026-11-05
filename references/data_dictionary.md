@@ -127,9 +127,9 @@ the numerical size of the channels. Round-trip is asserted at build time.
 | `asinh(f/b_j)` | 1.35 | 4.6 | 0.46 | x5.8 | - |
 | `log10 f` (f>0) | 0.73 | 3.72 | 0.29 | x84 | 21.7% of pixels |
 
-- **Asinh handles the data as measured.** 41% of pixels have |SNR|<1 and 21.7%
-  have negative flux, so `log` needs an arbitrary floor and `f/sigma` encodes
-  SNR instead of flux.
+- **Asinh handles the data as measured.** 36% of measured pixels have |SNR|<1 and
+  21.7% have negative flux, so `log` needs an arbitrary floor and `f/sigma`
+  encodes SNR instead of flux.
 - **The output noise is flat.** With `b_b = median sigma`, `sigma_x` spans only
   0.53..0.43 over the nine faintest flux deciles and drops to 0.10 on the
   brightest, where the measurement really is better. corr(sigma_x, |f|) = -0.01.
@@ -157,3 +157,15 @@ pointing, so every object of that pointing is in exactly one test set.
 
 Use `jpas_da.features.load_arrays()` to get `x`, `sigma_x`, `mask`,
 `object_id`, `tile_id` and `fold` as aligned arrays.
+
+## Walkthrough
+
+`notebooks/explore_data.py` (marimo) shows all of the above on the real files:
+shapes and load pattern, the 60-channel layout, the histogram of `x` against
+raw flux, `b_j`, the verification of the inverse, the flatness of `sigma_x`,
+one object plotted in both coordinates, the mask distribution, the
+brightness/shape variance split, and the folds.
+
+```bash
+marimo edit notebooks/explore_data.py
+```

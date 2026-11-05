@@ -13,10 +13,10 @@ spread.
 Why asinh and not raw flux, ``log``, or ``f/sigma`` -- all measured on the
 shipped sample (3.86M pixels):
 
-* Asinh is linear when ``|f| < b`` and logarithmic when ``|f| >> b``. 41% of
-  pixels have |SNR| < 1 and 21.7% have negative flux, so a plain ``log`` is
-  undefined on a fifth of the data and would need an arbitrary floor. Asinh is
-  defined everywhere, invertible, and needs no imputation.
+* Asinh is linear when ``|f| < b`` and logarithmic when ``|f| >> b``. 36% of
+  measured pixels have |SNR| < 1 and 21.7% have negative flux, so a plain
+  ``log`` is undefined on a fifth of the data and would need an arbitrary floor.
+  Asinh is defined everywhere, invertible, and needs no imputation.
 * The output noise stays nearly flat over the flux range. In flux units the
   propagated sigma spans 4.8x across |f| deciles; with ``b_b = median sigma``
   it spans 0.53..0.43 for the nine faintest deciles (dropping only on the

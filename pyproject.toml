@@ -42,3 +42,9 @@ extend-select = ["I"]  # Add import sorting
 known-first-party = ["jpas_da"]
 force-sort-within-sections = true
 
+[dependency-groups]
+dev = [
+    "altair>=6.2.2",
+    "marimo>=0.25.2",
+]
+
