@@ -1,15 +1,15 @@
 """Render the cluster Job template.
 
-tavla task ``cluster-job-template``: one Job YAML, filled in by make, so
-``make remote TARGET=<target>`` runs that make target inside the image on the
-cluster. Generated YAML is not committed.
+tavla task ``cluster-job-template``: one Job YAML, filled in by make. ``make
+job TARGET=<target>`` renders it; ``make submit`` applies it, so that one make
+target runs inside the image on the cluster. Generated YAML is not committed.
 
 Rendering is deliberately strict: every ``${PLACEHOLDER}`` must be supplied and
 every supplied value is type-checked, because a silently empty image tag or a
 malformed job name fails only after the pod is scheduled -- or worse, runs the
 wrong code. Nothing here talks to the cluster; ``kubectl`` is the user's call.
 
-Run ``python -m jpas_da.cluster --help`` or use ``make job-render``.
+Run ``python -m jpas_da.cluster --help`` or use ``make job``.
 """
 
 from __future__ import annotations
