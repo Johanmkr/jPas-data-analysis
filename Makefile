@@ -129,9 +129,9 @@ train-debug: data
 	$(PYTHON_INTERPRETER) -m jpas_da.modeling.train --config $(CONFIG) --debug $(SET)
 
 
-## Encode every object with the trained model
+## Encode every object with the trained model (needs models/vae.pt already)
 .PHONY: predict
-predict: train
+predict: data
 	$(PYTHON_INTERPRETER) -m jpas_da.modeling.predict
 
 
