@@ -80,7 +80,7 @@ flowchart LR
 |---|---|
 | `make data` | raw export → interim table, asinh representation, folds, `vae_inputs.npz` |
 | `make model-data` | just the RMS shape/scale step → `vae_inputs.npz` |
-| `make train` | full training run (`CONFIG=...`, `SET="--set ..."`) |
+| `make train` | full run; `DEBUG=1` for the tiny smoke run (`CONFIG=`, `SET="--set ..."`) |
 | `make train-debug` | 1024 objects, 2 epochs — smoke test |
 | `make predict` | encode every object into `vae_latents.parquet` |
 | `make docker-build` / `make docker-train` | build the CPU image, run the debug path in it |
@@ -104,7 +104,7 @@ loss:
 Override without editing the file:
 
 ```bash
-make train-debug SET="--set model.hidden=[64,32] --set loss.name=student_t"
+make train DEBUG=1 SET="--set model.hidden=[64,32] --set loss.name=student_t"
 ```
 
 Adding a loss is one function in `jpas_da/modeling/losses.py` plus its key in
