@@ -153,6 +153,12 @@ submit: job
 	kubectl apply -f cluster/jobs/$(TARGET)-$(IMAGE_TAG).yaml
 
 
+## Job and pod state for the current TARGET/IMAGE_TAG
+.PHONY: job-status
+job-status:
+	kubectl get jobs,pods -l app=jpas-da
+
+
 ## Follow the job's logs
 .PHONY: job-logs
 job-logs:
