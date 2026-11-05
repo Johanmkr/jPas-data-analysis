@@ -1,0 +1,14 @@
+.git
+.venv
+__pycache__
+*.py[cod]
+.pytest_cache
+.ruff_cache
+notebooks
+docs
+reports
+data/raw
+data/interim
+data/external
+data/processed
+vae-normalisation-and-loss.md

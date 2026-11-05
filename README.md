@@ -59,6 +59,80 @@ Analysing the jpas dataset using data science methods and machine learning techn
 
 --------
 
+## Pipeline
+
+`make data` goes from the immutable raw export to the model-ready arrays; every
+step is rerunnable and writes into `data/`.
+
+```mermaid
+flowchart LR
+    raw["data/raw/*.csv"] --> interim["interim/objects.parquet<br/>flux, sigma, mask"]
+    interim --> features["processed/jpas_asinh.parquet"]
+    interim --> folds["interim/folds.parquet<br/>leave-one-tile-out"]
+    interim --> arrays["processed/vae_inputs.npz<br/>g, v, mask, logr"]
+    folds --> arrays
+    arrays --> train["models/vae.pt<br/>reports/metrics.json"]
+    train --> latents["processed/vae_latents.parquet"]
+```
+
+| Target | What it does |
+|---|---|
+| `make data` | raw export → interim object table and band scales |
+| `make data` (`features`, `splits`) | asinh representation, fold assignment |
+| `make model-data` | RMS shape/scale decomposition → `vae_inputs.npz` |
+| `make train` | full training run (`CONFIG=...`, `SET="--set ..."`) |
+| `make train-debug` | 1024 objects, 2 epochs — smoke test |
+| `make predict` | encode every object into `vae_latents.parquet` |
+| `make docker-build` / `make docker-train` | build the CPU image, run the debug path in it |
+| `make smoke` | `train-debug` plus `pytest` |
+
+### The model
+
+A standard Gaussian-posterior VAE over the 60-band SED shape. The input is the
+per-object RMS normalisation `g = f / ||f||` with its propagated error `v` and
+the validity mask, so brightness is factored out into `log r` and handled by a
+separate head; `vae-normalisation-and-loss.md` derives why. Everything is a
+knob in `configs/vae.yaml`:
+
+```yaml
+model:
+  channels: [g, v, mask]   # any subset of the encoder inputs
+  latent_dim: 6
+  hidden: [256, 128]       # one width per conv layer
+  kernel_size: 5
+loss:
+  name: gaussian_nll       # gaussian_nll | student_t | weighted_mse | mse
+```
+
+Override without editing the file:
+
+```bash
+make train-debug SET="--set model.hidden=[64,32] --set loss.name=student_t"
+```
+
+Adding a loss is one function in `jpas_da/modeling/losses.py` plus its key in
+`LOSSES`; a new channel is one entry in `jpas_da/modeling/data.py` and in
+`CHANNELS`. Changing either never touches the model or the training loop.
+
+Training writes `models/vae.pt` (weights, architecture, noise floor and the
+resolved config) and `reports/metrics.json` (per-epoch history, final losses).
+
+### Docker / cluster
+
+The image is CPU by default; on a GPU node install torch from the matching CUDA
+index and set `train.device: cuda` (or `--set train.device=cuda`). The image
+does not contain data — mount it:
+
+```bash
+make docker-build
+docker run --rm -v "$PWD/data:/app/data" -v "$PWD/models:/app/models" \
+  -v "$PWD/reports:/app/reports" jpas-da:dev make train-debug
+```
+
+For a real run on the cluster, replace the container command with
+`make train` and point the job template at the mounted data directory.
+
+--------
 
 ## Notebooks
 
