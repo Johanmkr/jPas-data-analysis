@@ -30,6 +30,8 @@ RUN uv sync --frozen --no-dev --no-install-project
 COPY Makefile ./
 COPY configs ./configs
 COPY jpas_da ./jpas_da
+# The cluster smoke run (`make job TARGET=test`) needs the suite in-image.
+COPY tests ./tests
 RUN uv sync --frozen --no-dev
 
 # `uv run` would try to re-resolve; the image already has the exact environment.

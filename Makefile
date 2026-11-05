@@ -19,6 +19,11 @@ IMAGE ?= jpas-da:$(IMAGE_TAG)
 TARGET ?= train
 GPU_COUNT ?= 1
 
+# `make train DEBUG=1` is the smoke path the objective names; `--debug` caps
+# the run at train.debug_epochs on train.debug_objects.
+DEBUG ?= 0
+TRAIN_FLAGS = $(if $(filter 1 true yes,$(DEBUG)),--debug,)
+
 #################################################################################
 # COMMANDS                                                                      #
 #################################################################################
@@ -112,10 +117,10 @@ data: model-data
 	@echo ">>> data/processed: $$(ls data/processed | tr '\n' ' ')"
 
 
-## Train the VAE (CONFIG and SET override configs/vae.yaml)
+## Train the VAE (CONFIG/SET override configs/vae.yaml; DEBUG=1 for a tiny run)
 .PHONY: train
 train: data
-	$(PYTHON_INTERPRETER) -m jpas_da.modeling.train --config $(CONFIG) $(SET)
+	$(PYTHON_INTERPRETER) -m jpas_da.modeling.train --config $(CONFIG) $(TRAIN_FLAGS) $(SET)
 
 
 ## Two-epoch run on a small subset, for smoke-testing the pipeline
