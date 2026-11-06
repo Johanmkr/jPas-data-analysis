@@ -64,85 +64,90 @@ Analysing the jpas dataset using data science methods and machine learning techn
 `make data` goes from the immutable raw export to the model-ready arrays under
 `data/processed/`; every step is rerunnable and writes into `data/`. `make train`
 and `make train-debug` depend on it, so a clean checkout needs no manual steps.
+The design and the reasons behind it are in `references/pipeline-v2-plan.md`;
+every column and number is in `references/data_dictionary.md`.
 
 ```mermaid
 flowchart LR
-    raw["data/raw/*.csv"] --> interim["interim/objects.parquet<br/>flux, sigma, mask"]
-    interim --> features["processed/jpas_asinh.parquet"]
-    interim --> folds["interim/folds.parquet<br/>leave-one-tile-out"]
-    interim --> arrays["processed/vae_inputs.npz<br/>g, v, mask, logr"]
-    folds --> arrays
+    raw["data/raw/*.csv"] --> interim["interim/objects.parquet<br/>flux, sigma, mask,<br/>holdout, quality"]
+    interim --> splits["interim/splits.parquet<br/>4 tile rotations"]
+    interim --> arrays["processed/vae_inputs.npz<br/>g, v, mask, logr, sig_logr"]
     arrays --> train["models/vae.pt<br/>reports/metrics.json"]
-    train --> latents["processed/vae_latents.parquet"]
+    splits -.roles recomputed.-> train
+    train --> latents["models/vae_latents.parquet"]
 ```
 
 | Target | What it does |
 |---|---|
-| `make data` | raw export → interim table, asinh representation, folds, `vae_inputs.npz` |
-| `make model-data` | just the RMS shape/scale step → `vae_inputs.npz` |
-| `make train` | full run; `DEBUG=1` for the tiny smoke run (`CONFIG=`, `SET="--set ..."`) |
+| `make data` | raw export → interim table, splits, `vae_inputs.npz` |
+| `make train` | one rotation (`data.rotation`); `DEBUG=1` for the tiny smoke run (`CONFIG=`, `SET="--set ..."`) |
 | `make train-debug` | 1024 objects, 2 epochs — smoke test |
-| `make predict` | encode every object into `vae_latents.parquet` |
+| `make predict` | encode every object (all roles, incl. holdout) into `models/vae_latents.parquet` |
 | `make docker-build` / `make docker-train` | build the CPU image, run the debug path in it |
 | `make smoke` | `train-debug` plus `pytest` |
 
+### Data
+
+- **Holdout:** the 1,168 objects with SDSS spectra are kept for label-based
+  inference and never enter training, validation, testing or a fitted quantity.
+- **Quality:** `severe` objects (saturated, truncated, corrupted aperture, or
+  near a bright star; 3,672) are excluded; blends and objects outside the
+  window frame are kept.
+- **Splits:** rotation *k* tests on tile *k*, validates on tile *k+1* and trains
+  on the other two, so the test tile is never used for a choice.
+
+### Normalisation
+
+Per object, every band is divided by the broad-band brightness:
+
+```text
+r_bb     = sqrt( mean over measured {g, r, i} of f^2 )
+g_j      = f_j / r_bb                                  all 60 bands
+v_j      = sqrt( sigma_j^2 + (0.026 f_j)^2 ) / r_bb    0 where mask_j = 0
+logr     = log r_bb,  sig_logr by the delta method
+```
+
+Narrow bands would make a poor brightness (noise is 69% of their RMS); `log
+r_bb` has median S/N 6.4. No sample statistic enters, so nothing leaks across
+tiles.
+
 ### The model
 
-A standard Gaussian-posterior VAE over the 60-band SED shape. Everything is a
-knob in `configs/vae.yaml`:
+A conditional VAE. The encoder convolves the 54 narrow bands (on their 100 A
+grid) and **flattens** -- no pooling, because where a feature sits in
+wavelength is the redshift signal -- while the six off-grid filters and `log
+r_bb` go through a small MLP. The decoder maps `[z, log r_bb]` to all 60 bands.
+Brightness is a condition, not predicted, so the latent describes SED shape
+given brightness.
+
+The likelihood is Gaussian with known variance
+`w^2 = v^2 + eps^2 + (g * sig_logr)^2`: `eps` (default 0.1) means no band is
+known better than 10% of the broad-band brightness, and the last term is the
+shared error of `r_bb`. Everything is a knob in `configs/vae.yaml`:
 
 ```yaml
 model:
-  channels: [g, v, mask]   # any subset of the encoder inputs
-  latent_dim: 6
-  hidden: [256, 128]       # one width per conv layer
-  kernel_size: 5
+  encoder: conv            # conv | mlp (flattened ablation)
+  channels: [g, v, mask]   # any subset
+  conditions: [logr]       # optionally sig_logr
+  latent_dim: 8
 loss:
-  name: gaussian_nll       # gaussian_nll | student_t | weighted_mse | mse
+  name: gaussian_nll       # gaussian_nll | student_t | mse
+  beta: 1.0
+  eps: 0.1
 ```
 
 Override without editing the file:
 
 ```bash
-make train DEBUG=1 SET="--set model.hidden=[64,32] --set loss.name=student_t"
+make train DEBUG=1 SET="--set model.latent_dim=4 --set data.rotation=2"
 ```
 
-Adding a loss is one function in `jpas_da/modeling/losses.py` plus its key in
-`LOSSES`; a new channel is one entry in `jpas_da/modeling/data.py` and in
-`CHANNELS`. Changing either never touches the model or the training loop.
-
-Architecture defaults live only in `jpas_da/modeling/config.py`; `build_model`
-takes every value explicitly, so training and inference cannot disagree.
-
-### Normalisation
-
-Per object, with `f_j` the flux, `sigma_j` its absolute error and `m_j` the
-validity mask (0 where the archive quoted no error):
-
-```text
-r   = sqrt( sum_j f_j^2 m_j )                  # brightness, masked bands excluded
-g_j = f_j / r                                  # shape, unit-norm over m_j = 1
-v_j = sqrt( sigma_j^2 + (0.026 f_j)^2 ) / r    # shape error, zero where m_j = 0
-logr, sig_logr = log r, sqrt( sum_j g_j^2 v_j^2 )
-```
-
-- Dividing flux and error by the same scalar leaves every Gaussian likelihood
-  term invariant, so it is conditioning, not modelling; no sample statistic
-  enters, so it cannot leak across folds.
-- `0.026` is the multiplicative relative-calibration term (~0.028 mag), a
-  survey constant, not fitted here.
-- A masked band is excluded from `r` and gets `v = 0`, never `sigma = 0`: its
-  flux is real but unweighted.
-- The additive per-band floor `s_j` is **not** stored in the arrays. It is a
-  percentile of `v` fitted on the training fold at run time
-  (`loss.floor_percentile`) and fixed, because the quoted error is purely
-  relative and vanishes with the flux.
-
-`references/vae-normalisation-and-loss.md` (partly superseded by `references/pipeline-v2-plan.md`) has the measurements and derivations behind
-these choices.
-
-Training writes `models/vae.pt` (weights, architecture, noise floor and the
-resolved config) and `reports/metrics.json` (per-epoch history, final losses).
+Training writes `models/vae.pt` (best epoch by validation loss, with its
+architecture, channels, conditions and `eps`), `models/vae_last.pt`, and
+`reports/metrics.json` (per-epoch history with KL per latent dimension, and the
+evaluation reports on the validation and test tiles: chi2/dof by S/N, tile and
+quality, active latent dimensions).
 
 ### Docker / cluster
 

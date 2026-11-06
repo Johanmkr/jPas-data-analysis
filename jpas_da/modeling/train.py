@@ -1,17 +1,28 @@
-"""Train the SED-shape VAE.
+"""Train the conditional SED VAE on one tile rotation.
 
-The loop is one epoch of minibatches over the training fold, validating on the
-held-out tile each epoch. It writes two artefacts: a checkpoint (model weights
-plus the arrays needed to rebuild it) and ``reports/metrics.json`` with the
-per-epoch history, the fitted noise floor and the resolved configuration.
+One run = one rotation (``data.rotation``): it trains on two tiles, selects the
+best epoch on the validation tile, and reports on the test tile, which is never
+used for any choice. The holdout (SDSS-spectroscopic objects) and the
+``severe`` quality class never enter.
+
+Artefacts:
+
+* ``output.model_path`` -- the best-by-validation checkpoint (weights,
+  architecture spec, channels, conditions, eps, rotation, resolved config);
+  ``<stem>_last.pt`` next to it holds the last epoch.
+* ``output.metrics_path`` -- per-epoch history (training loss with sampling;
+  validation loss, reconstruction and KL per dimension without sampling), the
+  best epoch, and the full :mod:`jpas_da.modeling.evaluate` reports on the
+  validation and test tiles.
 
 All modelling choices come from ``configs/vae.yaml``; ``--set key=value``
-overrides any of them without editing the file, and ``--debug`` trains on a
-small subset for a couple of epochs so the pipeline can be smoke-tested.
+overrides any of them, and ``--debug`` trains on a small subset for a couple of
+epochs so the pipeline can be smoke-tested.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
 import math
 from pathlib import Path
@@ -24,15 +35,19 @@ import numpy as np
 import torch
 import typer
 
+from jpas_da.bands import N_BANDS
 from jpas_da.config import PROJ_ROOT
 from jpas_da.modeling import data as model_data
+from jpas_da.modeling import evaluate
 from jpas_da.modeling.config import Config, dump_config, load_config
-from jpas_da.modeling.losses import get_loss
-from jpas_da.modeling.vae import VAE, build_model, normalise_shape
+from jpas_da.modeling.losses import get_loss, noise_variance
+from jpas_da.modeling.vae import VAE, build_model, kl_per_dim
 
 app = typer.Typer()
 
 DEFAULT_CONFIG = PROJ_ROOT / "configs" / "vae.yaml"
+DEBUG_EVAL_OBJECTS = 2048
+"""Validation/test objects scored per epoch in ``--debug`` runs."""
 
 
 def resolve_device(requested: str) -> torch.device:
@@ -51,25 +66,59 @@ def set_seed(seed: int) -> None:
     torch.cuda.manual_seed_all(seed)
 
 
-def noise_floor(v: torch.Tensor, mask: torch.Tensor, percentile: float) -> torch.Tensor:
-    """Per-band additive error floor from the training fold.
+def last_path(model_path: Path) -> Path:
+    return model_path.with_name(f"{model_path.stem}_last{model_path.suffix}")
 
-    The archive's quoted error is purely relative, so ``v`` vanishes with the
-    flux and a near-zero-flux band would claim infinite precision. The floor is
-    a percentile of the *finite* weighted errors in each band, computed on the
-    training rows only, and it is fixed for the run -- never learned.
-    """
-    bands = int(v.shape[1])
-    floored = v.new_empty(bands)
-    for band in range(bands):
-        column = v[:, band][mask[:, band] > 0]
-        column = column[torch.isfinite(column)]
-        if column.numel() == 0:
-            raise ValueError(f"no defined pixels in band {band}; cannot set a floor")
-        floored[band] = torch.quantile(column, percentile / 100.0)
-    if not torch.isfinite(floored).all() or (floored <= 0).any():
-        raise ValueError("noise floor must be finite and positive in every band")
-    return floored
+
+@dataclass
+class Tensors:
+    """Every per-object tensor the model and the loss need, on one device."""
+
+    narrow: torch.Tensor
+    other: torch.Tensor
+    cond: torch.Tensor
+    g: torch.Tensor
+    v: torch.Tensor
+    mask: torch.Tensor
+    sig_logr: torch.Tensor
+
+    @classmethod
+    def build(
+        cls,
+        arrays: dict[str, np.ndarray],
+        channels: tuple[str, ...],
+        conditions: tuple[str, ...],
+        device: torch.device,
+    ) -> Tensors:
+        blocks = model_data.model_inputs(arrays, channels, conditions)
+        values = {
+            **blocks,
+            "g": arrays["g"].astype(np.float32),
+            "v": arrays["v"].astype(np.float32),
+            "mask": arrays["mask"].astype(np.float32),
+            "sig_logr": arrays["sig_logr"].astype(np.float32),
+        }
+        return cls(
+            **{k: torch.from_numpy(np.ascontiguousarray(a)).to(device) for k, a in values.items()}
+        )
+
+    def rows(self, index) -> Tensors:
+        return Tensors(**{k: getattr(self, k)[index] for k in self.__dataclass_fields__})
+
+
+def floor_tensor(config: Config, device: torch.device) -> torch.Tensor:
+    eps = config.loss.eps_per_band or (config.loss.eps,)
+    return torch.tensor(eps, dtype=torch.float32, device=device)
+
+
+def batch_terms(
+    model: VAE, loss_fn, config: Config, batch: Tensors, eps: torch.Tensor, sample: bool
+) -> dict[str, torch.Tensor]:
+    """Per-object reconstruction term, KL per dimension and model output."""
+    out = model(batch.narrow, batch.other, batch.cond, sample=sample)
+    w2 = noise_variance(batch.g, batch.v, batch.mask, batch.sig_logr, eps, config.loss.common_mode)
+    rec = loss_fn(batch.g, out["g_hat"], w2, batch.mask, dof=config.loss.student_t_dof)
+    return {"rec": rec, "kl": kl_per_dim(out["mu_z"], out["logvar_z"]), "w2": w2, **out}
 
 
 def beta_at(step: int, total_steps: int, config: Config) -> float:
@@ -80,79 +129,90 @@ def beta_at(step: int, total_steps: int, config: Config) -> float:
     return config.loss.beta * step / warmup
 
 
-def tensors_for(arrays: dict[str, np.ndarray], config: Config) -> tuple[np.ndarray, np.ndarray]:
-    """Stack the configured channels, keeping ``mask`` as the trailing channel."""
-    channels = [arrays[name].astype(np.float32) for name in config.model.channels]
-    x = np.stack(channels, axis=1)
-    mask = arrays["mask"].astype(np.float32)
-    return x, mask
-
-
-def batch_losses(
+@torch.no_grad()
+def run(
     model: VAE,
     loss_fn,
     config: Config,
-    x: torch.Tensor,
-    g: torch.Tensor,
-    v: torch.Tensor,
-    mask: torch.Tensor,
-    logr: torch.Tensor,
-    sig_logr: torch.Tensor,
-    s_floor: torch.Tensor,
-    beta: float,
-) -> tuple[torch.Tensor, dict[str, float]]:
-    out = model(x)
-    mu_g = normalise_shape(out["mu_g"], mask)
-    rec = loss_fn(g, v, mask, mu_g, s_floor, dof=config.loss.student_t_dof).mean()
-
-    mu_z, logvar_z = out["mu_z"], out["logvar_z"]
-    kl = 0.5 * (mu_z**2 + torch.exp(logvar_z) - 1.0 - logvar_z).sum(-1).mean()
-
-    loss = rec + beta * kl
-    parts = {"reconstruction": float(rec.detach()), "kl": float(kl.detach())}
-
-    if out["l_mu"] is not None:
-        scale = (
-            0.5
-            * (logr - out["l_mu"].squeeze(-1)) ** 2
-            / (sig_logr**2 + config.loss.systematic_scale**2)
-        )
-        scale = scale.mean()
-        loss = loss + scale
-        parts["scale"] = float(scale.detach())
-
-    parts["loss"] = float(loss.detach())
-    return loss, parts
-
-
-def evaluate(
-    model: VAE,
-    loss_fn,
-    config: Config,
-    data: dict[str, torch.Tensor],
+    data: Tensors,
     index: np.ndarray,
-    s_floor: torch.Tensor,
-    beta: float,
+    eps: torch.Tensor,
     batch_size: int,
-) -> dict[str, float]:
+) -> dict[str, np.ndarray]:
+    """Deterministic pass (``z = mu_z``) over ``index``; numpy outputs per object."""
     model.eval()
-    totals: dict[str, float] = {}
-    seen = 0
-    with torch.no_grad():
-        for start in range(0, len(index), batch_size):
-            rows = index[start : start + batch_size]
-            _, parts = batch_losses(
-                model,
-                loss_fn,
-                config,
-                *(tensor[rows] for tensor in data["inputs"]),
-                s_floor=s_floor,
-                beta=beta,
-            )
-            for key, value in parts.items():
-                totals[key] = totals.get(key, 0.0) + value * len(rows)
-            seen += len(rows)
-    return {key: value / seen for key, value in totals.items()}
+    keys = ("rec", "kl", "w2", "mu_z", "logvar_z", "g_hat")
+    chunks: dict[str, list[np.ndarray]] = {k: [] for k in keys}
+    for start in range(0, len(index), batch_size):
+        terms = batch_terms(
+            model, loss_fn, config, data.rows(index[start : start + batch_size]), eps, False
+        )
+        for key in keys:
+            chunks[key].append(terms[key].cpu().numpy())
+    if not len(index):
+        return {}
+    return {key: np.concatenate(parts) for key, parts in chunks.items()}
+
+
+def epoch_summary(result: dict[str, np.ndarray], beta: float) -> dict[str, object]:
+    rec = float(result["rec"].mean())
+    kl_dims = result["kl"].mean(axis=0)
+    return {
+        "loss": rec + beta * float(kl_dims.sum()),
+        "reconstruction": rec,
+        "kl": float(kl_dims.sum()),
+        "kl_per_dim": [float(x) for x in kl_dims],
+    }
+
+
+def report(
+    result: dict[str, np.ndarray], data: Tensors, arrays: dict, index: np.ndarray
+) -> dict[str, object]:
+    """Full evaluation report for one role."""
+    chi2, dof = evaluate.chi2_per_object(
+        data.g[index].cpu().numpy(), result["g_hat"], result["w2"], data.mask[index].cpu().numpy()
+    )
+    return {
+        "reconstruction": evaluate.reconstruction_report(
+            chi2,
+            dof,
+            arrays["sig_logr"][index],
+            arrays["tile_id"][index],
+            arrays["quality"][index],
+        ),
+        "latent": evaluate.latent_report(result["kl"]),
+        "nll": float(result["rec"].mean()),
+    }
+
+
+def model_spec(config: Config) -> dict[str, object]:
+    return {
+        "encoder": config.model.encoder,
+        "n_channels": len(config.model.channels),
+        "n_cond": len(config.model.conditions),
+        "n_bands": N_BANDS,
+        "n_narrow": len(model_data.NARROW_INDEX),
+        "latent_dim": config.model.latent_dim,
+        "conv_channels": list(config.model.conv_channels),
+        "kernel_size": config.model.kernel_size,
+        "narrow_features": config.model.narrow_features,
+        "other_hidden": list(config.model.other_hidden),
+        "hidden": list(config.model.hidden),
+        "dropout": config.model.dropout,
+    }
+
+
+def checkpoint(model: VAE, config: Config, epoch: int) -> dict[str, object]:
+    return {
+        "state_dict": {k: v.detach().cpu().clone() for k, v in model.state_dict().items()},
+        "model": model_spec(config),
+        "channels": list(config.model.channels),
+        "conditions": list(config.model.conditions),
+        "eps": list(config.loss.eps_per_band or (config.loss.eps,)),
+        "rotation": config.data.rotation,
+        "epoch": epoch,
+        "config": config.to_dict(),
+    }
 
 
 @app.command()
@@ -166,180 +226,146 @@ def main(
     debug: Annotated[bool, typer.Option("--debug", help="Small subset, few epochs")] = False,
     seed: Annotated[int | None, typer.Option("--seed", help="Override train.seed")] = None,
 ) -> dict[str, object]:
-    """Train the VAE. ``--set dotted.key=value`` overrides the YAML."""
+    """Train the VAE on one rotation. ``--set dotted.key=value`` overrides the YAML."""
     config = load_config(config_path, list(overrides or []))
     if seed is not None:
         config.train.seed = seed
     if debug:
         config.train.epochs = config.train.debug_epochs
     set_seed(config.train.seed)
-
     device = resolve_device(config.train.device)
-    arrays = model_data.load(config.data.path)
-    x_np, mask_np = tensors_for(arrays, config)
 
-    folds = arrays["fold"]
-    fold_ids = np.unique(folds)
-    if config.data.fold not in fold_ids:
-        raise ValueError(f"fold {config.data.fold} not in {fold_ids.tolist()}")
-    train_index = np.flatnonzero(folds != config.data.fold)
-    val_index = np.flatnonzero(folds == config.data.fold)
+    arrays = model_data.load(config.data.path)
+    n_rot = len(np.unique(arrays["tile_id"]))
+    if config.data.rotation >= n_rot:
+        raise ValueError(f"data.rotation={config.data.rotation} but only {n_rot} rotations")
+    parts = model_data.split_indices(arrays, config.data.rotation)
+    rng = np.random.default_rng(config.train.seed)
     if debug:
-        if config.train.debug_objects > len(train_index):
+        if config.train.debug_objects > len(parts["train"]):
             raise ValueError(
                 f"debug_objects={config.train.debug_objects} exceeds the "
-                f"{len(train_index)} training objects"
+                f"{len(parts['train'])} training objects"
             )
-        rng = np.random.default_rng(config.train.seed)
-        train_index = np.sort(rng.choice(train_index, config.train.debug_objects, replace=False))
+        parts["train"] = np.sort(rng.choice(parts["train"], config.train.debug_objects, False))
+        for role in ("val", "test"):
+            keep = min(DEBUG_EVAL_OBJECTS, len(parts[role]))
+            parts[role] = np.sort(rng.choice(parts[role], keep, replace=False))
 
-    inputs = (
-        torch.from_numpy(x_np).to(device),
-        torch.from_numpy(arrays["g"]).to(device),
-        torch.from_numpy(arrays["v"]).to(device),
-        torch.from_numpy(mask_np).to(device),
-        torch.from_numpy(arrays["logr"]).to(device),
-        torch.from_numpy(arrays["sig_logr"]).to(device),
-    )
-    data = {"inputs": inputs}
-
-    s_floor = noise_floor(
-        inputs[2][train_index], inputs[3][train_index], config.loss.floor_percentile
-    )
-    logger.info(
-        f"per-band noise floor (p{config.loss.floor_percentile:g} of v): "
-        f"min {float(s_floor.min()):.4f}, median {float(s_floor.median()):.4f}, "
-        f"max {float(s_floor.max()):.4f}"
-    )
-
-    n_bands = int(arrays["n_bands"])
-    model = build_model(
-        {
-            "n_bands": n_bands,
-            "n_channels": len(config.model.channels),
-            "latent_dim": config.model.latent_dim,
-            "hidden": config.model.hidden,
-            "kernel_size": config.model.kernel_size,
-            "scale_head": config.model.scale_head,
-            "dropout": config.model.dropout,
-        }
-    ).to(device)
+    data = Tensors.build(arrays, config.model.channels, config.model.conditions, device)
+    eps = floor_tensor(config, device)
+    model = build_model(model_spec(config)).to(device)
+    model.set_condition_scale(data.cond[parts["train"]])
     loss_fn = get_loss(config.loss.name)
     optimiser = torch.optim.AdamW(
-        model.parameters(),
-        lr=config.train.learning_rate,
-        weight_decay=config.train.weight_decay,
+        model.parameters(), lr=config.train.learning_rate, weight_decay=config.train.weight_decay
     )
 
-    steps_per_epoch = math.ceil(len(train_index) / config.train.batch_size)
+    steps_per_epoch = math.ceil(len(parts["train"]) / config.train.batch_size)
     total_steps = steps_per_epoch * config.train.epochs
     logger.info(
-        f"{config.train.epochs} epochs, {len(train_index):,} train / "
-        f"{len(val_index):,} val objects, {steps_per_epoch} steps/epoch on {device}"
+        f"rotation {config.data.rotation}: {len(parts['train']):,} train / "
+        f"{len(parts['val']):,} val / {len(parts['test']):,} test objects; "
+        f"{config.train.epochs} epochs x {steps_per_epoch} steps on {device}"
     )
 
-    history: list[dict[str, float]] = []
+    history: list[dict[str, object]] = []
+    best = {"loss": math.inf, "epoch": 0, "state": None}
     step = 0
     started = time.time()
-    rng = np.random.default_rng(config.train.seed + 1)
     for epoch in range(1, config.train.epochs + 1):
         model.train()
-        order = rng.permutation(train_index)
-        running: dict[str, float] = {}
-        for batch_start in range(0, len(order), config.train.batch_size):
-            rows = order[batch_start : batch_start + config.train.batch_size]
+        order = rng.permutation(parts["train"])
+        running = {"loss": 0.0, "reconstruction": 0.0, "kl": 0.0}
+        for start in range(0, len(order), config.train.batch_size):
             beta = beta_at(step, total_steps, config)
-            loss, parts = batch_losses(
+            terms = batch_terms(
                 model,
                 loss_fn,
                 config,
-                *(tensor[rows] for tensor in inputs),
-                s_floor=s_floor,
-                beta=beta,
+                data.rows(order[start : start + config.train.batch_size]),
+                eps,
+                sample=True,
             )
+            rec, kl = terms["rec"].mean(), terms["kl"].sum(-1).mean()
+            loss = rec + beta * kl
             optimiser.zero_grad(set_to_none=True)
             loss.backward()
             if config.train.grad_clip > 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), config.train.grad_clip)
             optimiser.step()
             step += 1
-            for key, value in parts.items():
-                running[key] = running.get(key, 0.0) + value
+            running["loss"] += float(loss.detach())
+            running["reconstruction"] += float(rec.detach())
+            running["kl"] += float(kl.detach())
             if config.train.log_every and step % config.train.log_every == 0:
-                logger.info(
-                    f"epoch {epoch} step {step}/{total_steps} "
-                    f"loss {parts['loss']:.3f} rec {parts['reconstruction']:.3f} "
-                    f"kl {parts['kl']:.3f} beta {beta:.2f}"
-                )
+                logger.info(f"epoch {epoch} step {step}/{total_steps} loss {float(loss):.3f}")
 
-        train_metrics = {key: value / max(1, steps_per_epoch) for key, value in running.items()}
-        val_metrics = evaluate(
-            model,
-            loss_fn,
-            config,
-            data,
-            val_index,
-            s_floor,
+        val = epoch_summary(
+            run(model, loss_fn, config, data, parts["val"], eps, config.train.batch_size),
             config.loss.beta,
-            config.train.batch_size,
         )
         record = {
             "epoch": epoch,
             "beta": beta_at(step, total_steps, config),
-            **{f"train_{k}": v for k, v in train_metrics.items()},
-            **{f"val_{k}": v for k, v in val_metrics.items()},
+            **{f"train_{k}": v / steps_per_epoch for k, v in running.items()},
+            **{f"val_{k}": v for k, v in val.items()},
         }
         history.append(record)
+        # Select only once beta has reached its final value, so the selected
+        # epoch is scored by the objective it was trained for.
+        warm = record["beta"] >= config.loss.beta
+        if warm and val["loss"] < best["loss"]:
+            best = {"loss": val["loss"], "epoch": epoch, "state": checkpoint(model, config, epoch)}
         logger.info(
-            f"epoch {epoch}: train {record['train_loss']:.3f} "
-            f"(rec {record['train_reconstruction']:.3f}, kl {record['train_kl']:.3f}) | "
-            f"val {record['val_loss']:.3f}"
+            f"epoch {epoch}: train {record['train_loss']:.2f} | val {val['loss']:.2f} "
+            f"(rec {val['reconstruction']:.2f}, kl {val['kl']:.2f}) beta {record['beta']:.2f}"
+            + (" *" if best["epoch"] == epoch else "")
         )
+        if not math.isfinite(val["loss"]):
+            raise RuntimeError(f"non-finite validation loss at epoch {epoch}")
 
-    config.output.model_path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {
-            "state_dict": model.state_dict(),
-            "model": {
-                "n_bands": n_bands,
-                "n_channels": len(config.model.channels),
-                "latent_dim": config.model.latent_dim,
-                "hidden": list(config.model.hidden),
-                "kernel_size": config.model.kernel_size,
-                "scale_head": config.model.scale_head,
-                "dropout": config.model.dropout,
-            },
-            "channels": list(config.model.channels),
-            "s_floor": s_floor.cpu(),
-            "config": config.to_dict(),
-        },
-        config.output.model_path,
-    )
+    last = checkpoint(model, config, config.train.epochs)
+    if best["state"] is None:  # the run ended before beta finished warming up
+        best = {"loss": history[-1]["val_loss"], "epoch": config.train.epochs, "state": last}
+    model_path = config.output.model_path
+    model_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(best["state"], model_path)
+    torch.save(last, last_path(model_path))
 
-    final = history[-1]
+    model.load_state_dict(best["state"]["state_dict"])
+    reports = {
+        role: report(
+            run(model, loss_fn, config, data, parts[role], eps, config.train.batch_size),
+            data,
+            arrays,
+            parts[role],
+        )
+        for role in ("val", "test")
+    }
     metrics = {
         "config": config.to_dict(),
         "config_source": str(config_path) if config_path else None,
         "overrides": list(overrides or []),
         "debug": debug,
         "device": str(device),
-        "n_objects": {"train": len(train_index), "val": len(val_index)},
-        "n_bands": n_bands,
-        "channels": list(config.model.channels),
-        "noise_floor": [float(value) for value in s_floor.cpu()],
+        "rotation": config.data.rotation,
+        "n_objects": {role: len(parts[role]) for role in ("train", "val", "test")},
+        "best_epoch": best["epoch"],
         "history": history,
-        "final": final,
+        "val": reports["val"],
+        "test": reports["test"],
         "elapsed_seconds": round(time.time() - started, 2),
-        "model_path": str(config.output.model_path),
+        "model_path": str(model_path),
     }
-    if not all(math.isfinite(final[f"val_{key}"]) for key in ("loss", "reconstruction")):
-        raise RuntimeError(f"non-finite validation loss after training: {final}")
-
     config.output.metrics_path.parent.mkdir(parents=True, exist_ok=True)
     config.output.metrics_path.write_text(json.dumps(metrics, indent=2) + "\n")
+    test = reports["test"]
     logger.success(
-        f"Wrote {config.output.model_path} and {config.output.metrics_path} "
-        f"(val loss {final['val_loss']:.3f})"
+        f"best epoch {best['epoch']}; test chi2/dof pooled "
+        f"{test['reconstruction']['overall']['chi2_dof_pooled']:.3f}, "
+        f"active dims {test['latent']['active_dims']}/{config.model.latent_dim}. "
+        f"Wrote {model_path} and {config.output.metrics_path}"
     )
     if debug:
         logger.info("config used:\n" + dump_config(config))

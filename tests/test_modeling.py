@@ -364,3 +364,45 @@ def test_latent_report_counts_active_dimensions():
     report = latent_report(kl)
     assert report["active_dims"] == 2
     assert report["kl_total"] == pytest.approx(2.5)
+
+
+# --------------------------------------------------------------------------- #
+# training and prediction, end to end on synthetic arrays
+# --------------------------------------------------------------------------- #
+def test_train_and_predict_run_end_to_end(tmp_path):
+    import json
+
+    from jpas_da.modeling import predict, train
+
+    arrays = _arrays(n_per_tile=40)
+    arrays["mask"][0, 5] = 0
+    data_path = tmp_path / "inputs.npz"
+    np.savez(data_path, **arrays)
+    overrides = [
+        f"data.path={data_path}",
+        "data.rotation=1",
+        "model.latent_dim=2",
+        "model.conv_channels=[4]",
+        "model.narrow_features=8",
+        "model.other_hidden=[8]",
+        "model.hidden=[16]",
+        "train.epochs=3",
+        "train.batch_size=32",
+        "loss.beta_warmup_fraction=0.3",
+        f"output.model_path={tmp_path / 'vae.pt'}",
+        f"output.metrics_path={tmp_path / 'metrics.json'}",
+    ]
+    metrics = train.main(config_path=None, overrides=overrides, debug=False, seed=0)
+    assert (tmp_path / "vae.pt").exists() and (tmp_path / "vae_last.pt").exists()
+    saved = json.loads((tmp_path / "metrics.json").read_text())
+    assert saved["rotation"] == 1
+    assert 1 <= saved["best_epoch"] <= 3
+    assert len(saved["history"][-1]["val_kl_per_dim"]) == 2
+    assert np.isfinite(metrics["test"]["reconstruction"]["overall"]["chi2_dof_pooled"])
+
+    table = predict.main(model_path=tmp_path / "vae.pt", data_path=data_path, device_name="cpu")
+    assert len(table) == len(arrays["g"])
+    assert {"z_0", "z_1", "chi2", "role"} <= set(table.columns)
+    assert (table.loc[arrays["holdout"], "role"] == "holdout").all()
+    expected = model_data.roles(arrays, 1).astype(str)
+    np.testing.assert_array_equal(table["role"].to_numpy(), expected)

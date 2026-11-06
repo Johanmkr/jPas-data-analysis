@@ -1,9 +1,17 @@
-"""Encode objects with a trained VAE: latent means, brightness and reconstruction.
+"""Encode every object with a trained VAE.
 
-Writes one row per object (``object_id``, ``tile_id``, ``fold``, ``z_*``,
-``logr``, ``l_mu``, per-object losses) so downstream analysis never has to
-re-run the network. The checkpoint carries its own architecture and channel
-list, so inference cannot silently disagree with training.
+Writes one row per object -- training, validation, test, holdout and excluded
+alike -- with its role in the checkpoint's rotation, so downstream analysis
+(label-based inference on the holdout, anomaly searches) never has to re-run the
+network:
+
+``object_id``, ``tile_id``, ``role``, ``holdout``, ``quality``, ``logr``,
+``sig_logr``, ``z_0..z_{d-1}`` (posterior means), ``logvar_0..`` and the
+per-object ``chi2`` and ``dof`` of the deterministic reconstruction.
+
+The checkpoint carries its own architecture, channels, conditions and noise
+floor, so inference cannot silently disagree with training. The default output
+sits next to the checkpoint: ``models/vae.pt -> models/vae_latents.parquet``.
 """
 
 from __future__ import annotations
@@ -18,15 +26,16 @@ import pandas as pd
 import torch
 import typer
 
-from jpas_da.config import MODELS_DIR, PROCESSED_DATA_DIR
+from jpas_da.config import MODELS_DIR
+from jpas_da.features import MODEL_DATA_FILE
 from jpas_da.modeling import data as model_data
+from jpas_da.modeling import evaluate
+from jpas_da.modeling.config import Config, _build
 from jpas_da.modeling.losses import get_loss
-from jpas_da.modeling.train import resolve_device
-from jpas_da.modeling.vae import build_model, normalise_shape
+from jpas_da.modeling.train import Tensors, resolve_device, run
+from jpas_da.modeling.vae import build_model
 
 app = typer.Typer()
-
-PREDICTIONS_FILE = PROCESSED_DATA_DIR / "vae_latents.parquet"
 
 
 def load_checkpoint(path: Path, device: torch.device) -> tuple[torch.nn.Module, dict]:
@@ -37,68 +46,52 @@ def load_checkpoint(path: Path, device: torch.device) -> tuple[torch.nn.Module, 
     return model, checkpoint
 
 
+def latents_path(model_path: Path) -> Path:
+    return model_path.with_name(f"{model_path.stem}_latents.parquet")
+
+
 @app.command()
 def main(
     model_path: Annotated[Path, typer.Option("--model")] = MODELS_DIR / "vae.pt",
-    data_path: Annotated[Path, typer.Option("--data")] = PROCESSED_DATA_DIR / "vae_inputs.npz",
-    output_path: Annotated[Path, typer.Option("--output")] = PREDICTIONS_FILE,
+    data_path: Annotated[Path, typer.Option("--data")] = MODEL_DATA_FILE,
+    output_path: Annotated[Path | None, typer.Option("--output")] = None,
     batch_size: Annotated[int, typer.Option("--batch-size")] = 4096,
     device_name: Annotated[str, typer.Option("--device")] = "auto",
-) -> None:
+) -> pd.DataFrame:
     device = resolve_device(device_name)
-    model, checkpoint = load_checkpoint(model_path, device)
+    model, ckpt = load_checkpoint(model_path, device)
+    config = _build(Config, ckpt["config"], "checkpoint config")
     arrays = model_data.load(data_path)
+    data = Tensors.build(arrays, tuple(ckpt["channels"]), tuple(ckpt["conditions"]), device)
+    eps = torch.tensor(ckpt["eps"], dtype=torch.float32, device=device)
 
-    channels = checkpoint["channels"]
-    x = np.stack([arrays[name].astype(np.float32) for name in channels], axis=1)
-    mask = torch.from_numpy(arrays["mask"].astype(np.float32)).to(device)
-    s_floor = checkpoint["s_floor"].to(device)
-    config = checkpoint["config"]
-    loss_fn = get_loss(config["loss"]["name"])
+    index = np.arange(len(arrays["g"]))
+    out = run(model, get_loss(config.loss.name), config, data, index, eps, batch_size)
+    chi2, dof = evaluate.chi2_per_object(arrays["g"], out["g_hat"], out["w2"], arrays["mask"])
 
-    z_chunks: list[np.ndarray] = []
-    l_mu_chunks: list[np.ndarray] = []
-    rec_chunks: list[np.ndarray] = []
-    with torch.no_grad():
-        for start in range(0, len(x), batch_size):
-            rows = slice(start, start + batch_size)
-            batch_x = torch.from_numpy(x[rows]).to(device)
-            out = model(batch_x)
-            z_chunks.append(out["mu_z"].cpu().numpy())
-            g = torch.from_numpy(arrays["g"][rows]).to(device)
-            v = torch.from_numpy(arrays["v"][rows]).to(device)
-            batch_mask = mask[rows]
-            mu = normalise_shape(out["mu_g"], batch_mask)
-            rec = loss_fn(
-                g,
-                v,
-                batch_mask,
-                mu,
-                s_floor,
-                dof=config["loss"]["student_t_dof"],
-            )
-            rec_chunks.append(rec.cpu().numpy())
-            if out["l_mu"] is not None:
-                l_mu_chunks.append(out["l_mu"].squeeze(-1).cpu().numpy())
-
-    z = np.concatenate(z_chunks)
     frame = {
         "object_id": arrays["object_id"],
         "tile_id": arrays["tile_id"],
+        "role": model_data.roles(arrays, int(ckpt["rotation"])).astype(str),
+        "holdout": arrays["holdout"],
+        "quality": arrays["quality"],
         "logr": arrays["logr"],
-        "reconstruction": np.concatenate(rec_chunks),
+        "sig_logr": arrays["sig_logr"],
+        "chi2": chi2,
+        "dof": dof,
     }
-    if "fold" in arrays:
-        frame["fold"] = arrays["fold"]
-    for index in range(z.shape[1]):
-        frame[f"z_{index}"] = z[:, index]
-    if l_mu_chunks:
-        frame["l_mu"] = np.concatenate(l_mu_chunks)
+    for i in range(out["mu_z"].shape[1]):
+        frame[f"z_{i}"] = out["mu_z"][:, i]
+    for i in range(out["logvar_z"].shape[1]):
+        frame[f"logvar_{i}"] = out["logvar_z"][:, i]
+    table = pd.DataFrame(frame)
 
+    output_path = output_path or latents_path(model_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(frame).to_parquet(output_path, index=False)
-    logger.success(f"Wrote {output_path} ({len(z):,} objects, {z.shape[1]} latents)")
-    print(json.dumps({"output": str(output_path), "n_objects": len(z), "latent_dim": z.shape[1]}))
+    table.to_parquet(output_path, index=False)
+    logger.success(f"Wrote {output_path} ({len(table):,} objects, {out['mu_z'].shape[1]} latents)")
+    print(json.dumps({"output": str(output_path), "n_objects": len(table)}))
+    return table
 
 
 if __name__ == "__main__":
