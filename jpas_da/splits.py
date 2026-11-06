@@ -1,19 +1,30 @@
-"""Grouped train/validation splits.
+"""Train / validation / test roles by tile rotation, plus the inference holdout.
 
-The unit of independence here is the pointing, not the object. miniJPAS is four
-overlapping 0.27 deg^2 pointings; objects are never shared between them, but
-neighbouring sources inside a pointing share sky background, crowding and the
-survey's per-pointing photometric calibration. A random row split therefore
-lets a model see, in training, sources whose noise it will be scored on.
+The unit of independence is the pointing, not the object. miniJPAS has four
+pointings; neighbouring sources inside one share sky background, crowding and
+the per-pointing calibration, so a random row split lets a model see, in
+training, sources whose noise it is scored on. Holding out whole tiles is also
+the case that matters in practice: applying the model to a new field.
 
-``split_by_tile`` assigns each object a fold by holding out one pointing, which
-is also the failure mode that matters in production: applying a model to a new
-field. It returns plain integer arrays so :mod:`jpas_da.modeling.train` and
-:mod:`jpas_da.modeling.predict` cannot disagree about which rows were held out.
+With tiles in sorted order ``T`` and ``n = len(T)``, rotation ``k`` uses::
 
-The tile depths differ (median log-sigma 0.89 to 1.03 dex across the four
-pointings), so a fold score is partly a measure of depth mismatch. That is the
-intended reading, not an artefact to be normalised away.
+    test  = T[k]
+    val   = T[(k + 1) % n]
+    train = every other tile
+
+so each tile is the test tile exactly once over ``n`` rotations, and the test
+tile is never used for model selection. Roles are derived from ``k`` in code;
+nothing about a rotation is stored that could drift.
+
+Two kinds of object get no role:
+
+* ``holdout`` -- the SDSS-spectroscopic objects, kept for label-based
+  inference (see :func:`jpas_da.dataset.label_flags`);
+* ``excluded`` -- ``quality == "severe"`` (compromised photometry; see
+  :func:`jpas_da.dataset.quality_class`).
+
+The tile depths differ (median log-sigma 0.89 to 1.03 dex), so a test score is
+partly a measure of depth mismatch. That is the intended reading.
 """
 
 from __future__ import annotations
@@ -26,71 +37,69 @@ import pandas as pd
 import typer
 
 from jpas_da.config import INTERIM_DATA_DIR
+from jpas_da.dataset import TRAINING_QUALITY
 
 app = typer.Typer()
 
-FOLDS_FILE = INTERIM_DATA_DIR / "folds.parquet"
+SPLITS_FILE = INTERIM_DATA_DIR / "splits.parquet"
+ROLES = ("train", "val", "test")
 
 
-def split_by_tile(
-    tiles: np.ndarray, n_splits: int | None = None
-) -> tuple[np.ndarray, list[tuple[np.ndarray, np.ndarray]]]:
-    """Leave-one-tile-out fold assignment.
+def rotation_tiles(tiles: np.ndarray, rotation: int) -> dict[str, list[int]]:
+    """Which tiles play which role in ``rotation``."""
+    unique = sorted(int(t) for t in np.unique(tiles))
+    n = len(unique)
+    if n < 3:
+        raise ValueError(f"need at least three tiles for train/val/test, got {n}")
+    if not 0 <= rotation < n:
+        raise ValueError(f"rotation must be in [0, {n - 1}], got {rotation}")
+    test, val = unique[rotation], unique[(rotation + 1) % n]
+    return {"train": [t for t in unique if t not in (test, val)], "val": [val], "test": [test]}
 
-    Parameters
-    ----------
-    tiles
-        Tile identifier per object, in object order.
-    n_splits
-        Number of folds. Defaults to one per distinct tile.
 
-    Returns
-    -------
-    folds
-        Fold index per object; ``-1`` where the tile was never held out.
-    splits
-        ``(train_index, test_index)`` per fold, as integer positions.
+def assign_roles(
+    tile_id: np.ndarray, holdout: np.ndarray, quality: np.ndarray, rotation: int
+) -> np.ndarray:
+    """One role per object: ``train``/``val``/``test``/``holdout``/``excluded``."""
+    tile_id = np.asarray(tile_id)
+    roles = np.empty(len(tile_id), dtype=object)
+    for role, tiles in rotation_tiles(tile_id, rotation).items():
+        roles[np.isin(tile_id, tiles)] = role
+    roles[~np.isin(np.asarray(quality), TRAINING_QUALITY)] = "excluded"
+    roles[np.asarray(holdout, dtype=bool)] = "holdout"
+    return roles
+
+
+def n_rotations(tile_id: np.ndarray) -> int:
+    return len(np.unique(tile_id))
+
+
+def build(objects_path: Path | None = None, output_path: Path = SPLITS_FILE) -> pd.DataFrame:
+    """Write ``object_id``, ``tile_id``, ``holdout``, ``quality`` and ``role_<k>``.
+
+    The ``role_<k>`` columns are a convenience for analysis joins; training
+    recomputes them with :func:`assign_roles`, so they cannot disagree.
     """
-    tiles = np.asarray(tiles)
-    unique_tiles = np.unique(tiles)
-    if len(unique_tiles) < 2:
-        raise ValueError(f"need at least two tiles for a grouped split, got {len(unique_tiles)}")
-    if n_splits is None:
-        n_splits = len(unique_tiles)
-    if not 2 <= n_splits <= len(unique_tiles):
-        raise ValueError(f"n_splits must be in [2, {len(unique_tiles)}], got {n_splits}")
-
-    folds = np.full(len(tiles), -1, dtype=np.int64)
-    splits: list[tuple[np.ndarray, np.ndarray]] = []
-    for fold, tile in enumerate(unique_tiles[:n_splits]):
-        held_out = tiles == tile
-        folds[held_out] = fold
-        splits.append((np.flatnonzero(~held_out), np.flatnonzero(held_out)))
-        logger.info(
-            f"fold {fold}: tile {tile} held out, {held_out.sum():,} test / "
-            f"{(~held_out).sum():,} train objects"
-        )
-    return folds, splits
-
-
-def build(objects_path: Path | None = None, output_path: Path = FOLDS_FILE) -> pd.DataFrame:
-    """Write ``object_id`` -> fold, so every downstream step reads the same split."""
     objects_path = objects_path or INTERIM_DATA_DIR / "objects.parquet"
-    objects = pd.read_parquet(objects_path, columns=["object_id", "tile_id"])
-    folds, _ = split_by_tile(objects["tile_id"].to_numpy())
-    assignment = pd.DataFrame(
-        {"object_id": objects["object_id"], "tile_id": objects["tile_id"], "fold": folds}
-    )
-    if (assignment["fold"] < 0).any():
-        raise ValueError("some objects were never assigned to a fold")
+    objects = pd.read_parquet(objects_path, columns=["object_id", "tile_id", "holdout", "quality"])
+    table = objects.copy()
+    for k in range(n_rotations(objects["tile_id"])):
+        roles = assign_roles(objects["tile_id"], objects["holdout"], objects["quality"], k)
+        table[f"role_{k}"] = roles
+        counts = pd.Series(roles).value_counts()
+        tiles = rotation_tiles(objects["tile_id"].to_numpy(), k)
+        logger.info(
+            f"rotation {k}: test {tiles['test']}, val {tiles['val']}, train {tiles['train']} | "
+            + ", ".join(f"{r} {int(counts.get(r, 0)):,}" for r in (*ROLES, "holdout", "excluded"))
+        )
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    assignment.to_parquet(output_path, index=False)
-    logger.success(f"Wrote {output_path} ({assignment['fold'].nunique()} folds)")
-    return assignment
+    table.to_parquet(output_path, index=False)
+    logger.success(f"Wrote {output_path}")
+    return table
 
 
 @app.command()
-def main(objects_path: Path | None = None, output_path: Path = FOLDS_FILE):
+def main(objects_path: Path | None = None, output_path: Path = SPLITS_FILE):
     build(objects_path, output_path)
 
 

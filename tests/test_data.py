@@ -10,13 +10,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from jpas_da import features
+from jpas_da import asinh, features
 from jpas_da.bands import BAND_NAMES, BLOCK_ORDER, N_BANDS, select
 from jpas_da.config import RAW_DATA_DIR
 from jpas_da.dataset import (
     ERROR_COLUMN,
     METADATA_COLUMNS,
-    band_scales,
     build_photometry,
     clean_metadata,
     drop_duplicate_sources,
@@ -24,7 +23,7 @@ from jpas_da.dataset import (
     load_raw,
     quality_class,
 )
-from jpas_da.splits import split_by_tile
+from jpas_da.splits import assign_roles, rotation_tiles
 
 RAW_FILE = RAW_DATA_DIR / "miniJpas_fluxes_errors_redshifts_full.csv"
 
@@ -207,142 +206,167 @@ def test_drop_duplicate_sources_keeps_the_tightest_sdss_match():
 
 
 # --------------------------------------------------------------------------- #
-# representation
+# asinh (baseline representation)
 # --------------------------------------------------------------------------- #
-def _objects_from_raw(data: pd.DataFrame) -> pd.DataFrame:
-    flux, sigma, mask = build_photometry(data)
-    meta = clean_metadata(data)
-    identifiers = pd.DataFrame(
-        {
-            "object_id": meta["tile_id"].astype(str) + "-" + meta["number"].astype(str),
-            "tile_id": meta["tile_id"],
-        }
-    )
-    return pd.concat([identifiers, meta.drop(columns="tile_id"), flux, sigma, mask], axis=1)
-
-
-def test_asinh_roundtrip_recovers_every_defined_flux():
-    objects = _objects_from_raw(_synthetic_raw())
-    scales = band_scales(objects)
-    representation = features.build_representation(objects, scales)
-    features.check_roundtrip(representation, objects, scales)
-
-    flux = objects[[f"flux_{b}" for b in BAND_NAMES]].to_numpy()
-    x = representation[[f"x_{b}" for b in BAND_NAMES]].to_numpy() / features.PRESENTATION_SCALE
-    recovered = features.asinh_inverse(x, scales["b_j"].to_numpy())
-    np.testing.assert_allclose(recovered, flux, rtol=1e-10, atol=1e-10)
+def test_asinh_roundtrip_recovers_every_flux():
+    rng = np.random.default_rng(1)
+    flux = rng.normal(0.0, 50.0, size=(20, N_BANDS))
+    scale = np.full(N_BANDS, 7.0)
+    np.testing.assert_allclose(asinh.inverse(asinh.transform(flux, scale), scale), flux)
 
 
 def test_asinh_is_linear_in_the_noise_and_logarithmic_in_the_signal():
     scale = np.full(N_BANDS, 10.0)
     faint = np.array([[0.5] * N_BANDS])
     bright = np.array([[1000.0] * N_BANDS])
+    np.testing.assert_allclose(asinh.transform(faint, scale), faint / scale, rtol=1e-3)
     np.testing.assert_allclose(
-        features.asinh_transform(faint, scale), faint / scale, rtol=1e-3
-    )
-    np.testing.assert_allclose(
-        features.asinh_transform(bright, scale), np.log(2 * bright / scale), rtol=1e-5
+        asinh.transform(bright, scale), np.log(2 * bright / scale), rtol=1e-5
     )
 
 
 def test_negative_and_zero_flux_are_representable_and_finite():
     scale = np.full(N_BANDS, 10.0)
     flux = np.array([[-50.0, 0.0, 7.0] * 20])
-    x = features.asinh_transform(flux, scale)
+    x = asinh.transform(flux, scale)
     assert np.isfinite(x).all()
-    np.testing.assert_allclose(features.asinh_inverse(x, scale), flux, rtol=1e-12)
+    np.testing.assert_allclose(asinh.inverse(x, scale), flux, rtol=1e-12)
 
 
-def test_masked_pixels_get_zero_and_nan_sigma():
-    data = _synthetic_raw(undefined_pixel=(2, 7))
-    objects = _objects_from_raw(data)
-    scales = band_scales(objects)
-    representation = features.build_representation(objects, scales)
-    band = BAND_NAMES[7]
-    assert representation[f"x_{band}"].to_numpy()[2] == 0.0
-    assert np.isnan(representation[f"sigma_x_{band}"].to_numpy()[2])
-    assert representation[f"mask_{band}"].to_numpy()[2] == 0
-
-
-def _measured_noise_model(flux: np.ndarray) -> np.ndarray:
-    """``sigma_f ~ 0.4|f| + floor``: the shape measured in the export."""
-    return 0.4 * np.abs(flux) + 1.0
-
-
-def test_propagated_error_is_flat_once_the_source_dominates_the_noise():
-    """The reason the soft scale is the median sigma, not a flux floor.
-
-    With ``sigma_f = k|f| + floor``, asinh makes ``sigma_x -> k`` (a constant)
-    in the source-dominated regime instead of growing with flux as it does in
-    raw flux units.
-    """
+def test_propagated_asinh_error_is_flat_once_the_source_dominates():
+    """With ``sigma_f = k|f| + floor``, asinh makes ``sigma_x -> k``."""
     scale = np.full(N_BANDS, 10.0)
     flux = np.array([[100.0, 300.0, 1000.0, 3000.0, 10000.0, 30000.0] * 10])
-    errors = features.asinh_error(flux, _measured_noise_model(flux), scale)
-    assert errors.max() / errors.min() < 1.05, f"sigma_x varies by {errors.max() / errors.min():.2f}x"
-    assert np.allclose(errors, 0.4, rtol=0.05), "sigma_x should converge to the relative error"
+    errors = asinh.error(flux, 0.4 * np.abs(flux) + 1.0, scale)
+    assert errors.max() / errors.min() < 1.05
+    assert np.allclose(errors, 0.4, rtol=0.05)
 
 
-def test_the_same_noise_model_is_strongly_flux_dependent_in_flux_units():
-    """Counter-check for the previous test."""
-    flux = np.array([100.0, 300.0, 1000.0, 3000.0, 10000.0, 30000.0])
-    sigma = _measured_noise_model(flux)
-    assert sigma.max() / sigma.min() > 100
+def test_band_scales_use_only_the_rows_given_and_skip_masked_pixels():
+    sigma = np.ones((10, N_BANDS))
+    sigma[5:] = 100.0
+    mask = np.ones_like(sigma, dtype=np.int8)
+    mask[:5, 0] = 0
+    scales = asinh.fit_band_scales(sigma[:6], mask[:6])
+    assert scales[0] == 100.0, "masked pixels must not enter the median"
+    np.testing.assert_allclose(scales[1:], 1.0)
 
 
-def test_brightness_and_shape_both_survive_the_transform():
-    """With a common level times a common SED, both axes must remain visible."""
-    rng = np.random.default_rng(3)
-    sed = np.exp(-0.5 * ((np.arange(N_BANDS) - 25) / 12) ** 2) + 0.2
-    level = rng.uniform(30.0, 3000.0, size=(300, 1))
-    flux = level * sed * np.exp(rng.normal(0, 0.1, size=(300, N_BANDS)))
-    scale = np.full(N_BANDS, float(np.median(_measured_noise_model(flux))))
-
-    x = features.asinh_transform(flux, scale)
-    level_share = np.var(x.mean(axis=1)) / np.var(x)
-    assert 0.5 < level_share < 0.98, f"level share {level_share:.2f} outside the useful range"
-
-    flat = features.asinh_transform(level * sed, scale)
-    flat_share = np.var(flat.mean(axis=1)) / np.var(flat)
-    assert flat_share > level_share, "noise should add shape variance, not remove it"
+def test_band_scales_reject_a_band_with_no_measurement():
+    sigma = np.ones((4, N_BANDS))
+    mask = np.ones_like(sigma, dtype=np.int8)
+    mask[:, 3] = 0
+    with pytest.raises(ValueError, match="bands \\[3\\]"):
+        asinh.fit_band_scales(sigma, mask)
 
 
-def test_band_scales_are_positive_and_follow_band_order():
-    scales = band_scales(_objects_from_raw(_synthetic_raw(n_rows=30)))
-    assert list(scales["band"]) == list(BAND_NAMES)
-    assert (scales["b_j"] > 0).all()
+# --------------------------------------------------------------------------- #
+# broad-band RMS normalisation
+# --------------------------------------------------------------------------- #
+NORM = [BAND_NAMES.index(b) for b in features.NORM_BANDS]
 
 
-def test_representation_rejects_misordered_scales():
-    objects = _objects_from_raw(_synthetic_raw())
-    scales = band_scales(objects).sample(frac=1.0, random_state=0).reset_index(drop=True)
-    with pytest.raises(ValueError, match="canonical band order"):
-        features.build_representation(objects, scales)
+def _photometry(n_rows: int = 8, masked=()):
+    rng = np.random.default_rng(0)
+    flux = rng.normal(20.0, 10.0, size=(n_rows, N_BANDS))
+    sigma = np.abs(flux) * 0.2 + 1.0
+    mask = np.ones((n_rows, N_BANDS), dtype=np.int8)
+    for row, band in masked:
+        mask[row, band] = 0
+        sigma[row, band] = np.nan
+    return flux, sigma, mask
+
+
+def test_brightness_is_the_rms_of_the_measured_norm_bands():
+    flux, sigma, mask = _photometry(masked=[(1, NORM[0])])
+    out = features.normalise(flux, sigma, mask)
+    expected0 = np.sqrt(np.mean(flux[0, NORM] ** 2))
+    expected1 = np.sqrt(np.mean(flux[1, NORM[1:]] ** 2))
+    np.testing.assert_allclose(np.exp(out["logr"][:2]), [expected0, expected1], rtol=1e-5)
+
+
+def test_every_band_is_divided_by_the_same_brightness():
+    flux, sigma, mask = _photometry()
+    out = features.normalise(flux, sigma, mask)
+    recovered = out["g"].astype(np.float64) * np.exp(out["logr"].astype(np.float64))[:, None]
+    np.testing.assert_allclose(recovered, flux, rtol=1e-5)
+
+
+def test_normalisation_is_scale_free():
+    flux, sigma, mask = _photometry()
+    base = features.normalise(flux, sigma, mask)
+    scaled = features.normalise(1000.0 * flux, 1000.0 * sigma, mask)
+    np.testing.assert_allclose(scaled["g"], base["g"], rtol=1e-5)
+    np.testing.assert_allclose(scaled["v"], base["v"], rtol=1e-5)
+    np.testing.assert_allclose(scaled["sig_logr"], base["sig_logr"], rtol=1e-5)
+    np.testing.assert_allclose(scaled["logr"] - base["logr"], np.log(1000.0), rtol=1e-5)
+
+
+def test_masked_band_gets_zero_shape_and_zero_error():
+    flux, sigma, mask = _photometry(masked=[(0, 7)])
+    out = features.normalise(flux, sigma, mask)
+    assert out["g"][0, 7] == 0.0 and out["v"][0, 7] == 0.0 and out["mask"][0, 7] == 0
+
+
+def test_shape_error_carries_the_calibration_floor():
+    flux = np.full((1, N_BANDS), 50.0)
+    sigma = np.zeros_like(flux)
+    mask = np.ones_like(flux, dtype=np.int8)
+    out = features.normalise(flux, sigma, mask)
+    np.testing.assert_allclose(out["v"], features.RELATIVE_CALIB_FLOOR, rtol=1e-5)
+
+
+def test_brightness_error_is_the_delta_method_on_the_norm_bands():
+    flux, sigma, mask = _photometry()
+    out = features.normalise(flux, sigma, mask, floor_frac=0.0)
+    f, s = flux[:, NORM], sigma[:, NORM]
+    r2 = np.mean(f**2, axis=1)
+    expected = np.sqrt((f**2 * s**2).sum(axis=1)) / (3 * r2)
+    np.testing.assert_allclose(out["sig_logr"], expected, rtol=1e-5)
+
+
+def test_object_with_every_norm_band_masked_is_rejected():
+    flux, sigma, mask = _photometry(masked=[(0, j) for j in NORM])
+    with pytest.raises(ValueError, match="every norm band masked"):
+        features.normalise(flux, sigma, mask)
 
 
 # --------------------------------------------------------------------------- #
 # splits
 # --------------------------------------------------------------------------- #
-def test_split_by_tile_never_shares_a_tile_between_train_and_test():
-    tiles = np.repeat([2241, 2243, 2406, 2470], [50, 40, 30, 20])
-    folds, splits = split_by_tile(tiles)
-    assert len(splits) == 4
-    for train, test in splits:
-        assert set(tiles[train]).isdisjoint(tiles[test])
-        assert len(train) + len(test) == len(tiles)
-    assert (folds >= 0).all()
+TILES = np.repeat([2241, 2243, 2406, 2470], [50, 40, 30, 20])
 
 
-def test_split_by_tile_rejects_a_single_tile():
-    with pytest.raises(ValueError, match="at least two tiles"):
-        split_by_tile(np.array([2241, 2241, 2241]))
+def test_each_tile_is_the_test_tile_exactly_once():
+    tests = [rotation_tiles(TILES, k)["test"][0] for k in range(4)]
+    assert sorted(tests) == [2241, 2243, 2406, 2470]
 
 
-def test_split_by_tile_honours_n_splits():
-    tiles = np.repeat([2241, 2243, 2406, 2470], 10)
-    folds, splits = split_by_tile(tiles, n_splits=2)
-    assert len(splits) == 2
-    assert folds.max() == 1
+@pytest.mark.parametrize("k", range(4))
+def test_rotation_roles_are_disjoint_and_cover_every_tile(k):
+    tiles = rotation_tiles(TILES, k)
+    assigned = tiles["train"] + tiles["val"] + tiles["test"]
+    assert sorted(assigned) == [2241, 2243, 2406, 2470]
+    assert len(tiles["train"]) == 2
+    assert tiles["val"] != tiles["test"]
+
+
+def test_holdout_and_severe_objects_get_no_training_role():
+    holdout = np.zeros(len(TILES), dtype=bool)
+    holdout[:5] = True
+    quality = np.array(["clean"] * len(TILES), dtype=object)
+    quality[5:8] = "severe"
+    quality[8:10] = "window"
+    for k in range(4):
+        roles = assign_roles(TILES, holdout, quality, k)
+        assert (roles[:5] == "holdout").all()
+        assert (roles[5:8] == "excluded").all()
+        assert set(roles[8:]) <= {"train", "val", "test"}
+
+
+def test_rotation_out_of_range_is_rejected():
+    with pytest.raises(ValueError, match="rotation must be"):
+        rotation_tiles(TILES, 4)
 
 
 # --------------------------------------------------------------------------- #

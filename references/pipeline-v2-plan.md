@@ -34,8 +34,8 @@ From `data/interim/objects.parquet` (64,293 objects after removing duplicates):
   unmatched objects are brighter than r = 22.8. Spectroscopic: 1,168
   (685 GALAXY, 245 STAR, 238 QSO), 973 with usable `zsp`.
 - Narrow-band brightness is mostly noise: median `sqrt(Σσ²)/r` over the 54
-  narrow bands is 0.69. Broad-band `r_bb` has median S/N 3.7 (5th percentile
-  1.4). 603 objects have at least one of g/r/i masked, none have all three.
+  narrow bands is 0.69. Broad-band `log r_bb` has median S/N 6.4
+  (`1/sig_logr`, 5th percentile 2.5; the per-band average was 3.7). 603 objects have at least one of g/r/i masked, none have all three.
 - Errors do not vanish at low flux: no measured pixel has σ below 0.064× its
   band median, and pixels with near-zero flux keep a median σ of 0.55× it.
   The smallest `v` in the current arrays belongs to an object with
@@ -107,7 +107,7 @@ sig_logr = delta-method error of log r_bb from the g/r/i errors
 - The error of `r_bb` affects every band together. Diagonal approximation:
   add `(g_j · sig_logr)²` to `w²`, behind a config flag (default on). This
   overstates independence, which is documented.
-- `r_bb` is still noisy for the faintest objects (5% have S/N < 1.4). No
+- `r_bb` is still noisy for the faintest objects (5% have S/N < 2.5). No
   debiasing in v2; report the S/N distribution and revisit if reconstruction
   quality depends strongly on it.
 - Arrays are stored per block: `narrow` (54), `other` (uJAVA, uJPAS, gSDSS,

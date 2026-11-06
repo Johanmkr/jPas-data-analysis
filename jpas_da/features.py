@@ -1,43 +1,35 @@
-"""Interim object table -> model-ready representation.
+"""Interim object table -> model-ready arrays: broad-band RMS normalisation.
 
-The model input is the noise-scaled inverse hyperbolic sine of the flux::
+Every band of an object is divided by one number, its broad-band brightness::
 
-    x_b      = asinh(f_b / b_{p(b)}) * s_{p(b)}
-    sigma_x  = sigma_f / sqrt(f_b**2 + b_b**2) * s_{p(b)}
-    f_b      = b_b * sinh(x_b / s_{p(b)})
+    r_bb     = sqrt( mean over measured k in {gSDSS, rSDSS, iSDSS} of f_k^2 )
+    g_j      = f_j / r_bb                                   all 60 bands
+    v_j      = sqrt( sigma_j^2 + (0.026 f_j)^2 ) / r_bb     0 where mask_j = 0
+    logr     = log r_bb
+    sig_logr = sqrt( sum_k m_k f_k^2 sigma_k^2 ) / (n r_bb^2)   delta method
 
-with ``b_b`` the per-band soft scale from :mod:`jpas_da.dataset` and ``s_p``
-a per-band *presentation* scale chosen so all 60 channels have comparable
-spread.
+Why this normaliser (all measured on the shipped export):
 
-Why asinh and not raw flux, ``log``, or ``f/sigma`` -- all measured on the
-shipped sample (3.86M pixels):
+* **Broad bands, not narrow ones.** Narrow bands have median S/N ~1.1; over the
+  54 of them, noise makes up a median 69% of the RMS (``sqrt(sum sigma^2)/r``),
+  so a narrow-band brightness is mostly noise and biased high. ``log r_bb``
+  has median S/N 6.4 (``1/sig_logr``; 5th percentile 2.5).
+* **One scale for all 60 bands.** Narrow and broad bands stay on a common
+  footing, so narrow-versus-broad colours survive. There is no projection onto
+  the unit sphere.
+* **No sample statistic.** Each object is normalised by itself, so nothing
+  leaks across tiles.
+* **The noise of r_bb is shared by every band.** Dividing by a noisy scalar
+  adds a perfectly correlated error ``g_j * sig_logr``; the loss can add it as a
+  diagonal term (``loss.common_mode``), which overstates its independence.
+* ``0.026`` is the miniJPAS relative calibration scatter (~0.028 mag), a survey
+  constant, not fitted here.
 
-* Asinh is linear when ``|f| < b`` and logarithmic when ``|f| >> b``. 36% of
-  measured pixels have |SNR| < 1 and 21.7% have negative flux, so a plain
-  ``log`` is undefined on a fifth of the data and would need an arbitrary floor.
-  Asinh is defined everywhere, invertible, and needs no imputation.
-* The output noise stays nearly flat over the flux range. In flux units the
-  propagated sigma spans 4.8x across |f| deciles; with ``b_b = median sigma``
-  it spans 0.53..0.43 for the nine faintest deciles (dropping only on the
-  brightest, where the measurement really is better): corr(sigma_x, |f|) =
-  -0.01. A heteroscedastic Gaussian likelihood wants exactly that.
-* The geometry is sane. In raw flux, the brightest 0.1% of pixels carry 99.9%
-  of sum(f^2), so L2 distance is a fit to a few thousand bright pixels; only
-  60% of the 50 nearest neighbours of a sample object survive the switch to
-  asinh. ``f/sigma`` is worse still: it inverts the problem (sigma_x spans 65x
-  across flux deciles), turns the geometry into an SNR geometry, and is
-  undefined on the 0.94% of pixels with ``relerr == 0``.
-* Asinh space is close to Gaussian (skew 1.35, kurtosis 4.6) and its first PC
-  is per-object brightness at 69.5% of the variance, with 65% of the total coming
-  from the mean level and 35% from SED shape. Both are kept: brightness is a
-  real physical axis (distance/luminosity), so it stays in the channels rather
-  than being normalised away.
+A masked band (no usable error) keeps ``g = 0`` and ``v = 0``, so the loss gives
+it exactly zero weight. A masked norm band is left out of ``r_bb``; no object
+has all three masked.
 
-Masked pixels (``mask == 0``, sigma undefined) get ``x = 0``, the asinh origin,
-i.e. "no flux measurement". The mask channel tells the model and the loss to
-ignore them; ``x = 0`` is never mistaken for a detection because every real
-non-detection has ``|x|`` of order the noise, not zero.
+``r_bb`` is still noisy for the faintest objects and is not debiased here.
 """
 
 from __future__ import annotations
@@ -49,155 +41,113 @@ import numpy as np
 import pandas as pd
 import typer
 
-from jpas_da.bands import BAND_NAMES
+from jpas_da.bands import BAND_INDEX, BAND_NAMES, N_BANDS
 from jpas_da.config import INTERIM_DATA_DIR, PROCESSED_DATA_DIR
 
 app = typer.Typer()
 
 OBJECTS_FILE = INTERIM_DATA_DIR / "objects.parquet"
-BAND_SCALES_FILE = INTERIM_DATA_DIR / "band_scales.parquet"
-REPRESENTATION_FILE = PROCESSED_DATA_DIR / "jpas_asinh.parquet"
+MODEL_DATA_FILE = PROCESSED_DATA_DIR / "vae_inputs.npz"
 
-# Presentation scaling: one global factor for all bands. It only fixes the
-# numerical magnitude of the channels (asinh(x)/s is monotonic, so it cannot
-# change a distance ordering) and is kept in the file so inversion is exact.
-PRESENTATION_SCALE = 2.0
+NORM_BANDS = ("gSDSS", "rSDSS", "iSDSS")
+"""Bands whose RMS is the per-object brightness."""
 
-
-def asinh_transform(flux: np.ndarray, scale: np.ndarray) -> np.ndarray:
-    """``asinh(f / b)``; masked (NaN) flux maps to 0."""
-    out = np.arcsinh(np.divide(flux, scale, out=np.zeros_like(flux), where=np.isfinite(flux)))
-    out[~np.isfinite(flux)] = 0.0
-    return out
+RELATIVE_CALIB_FLOOR = 0.026
+"""miniJPAS relative calibration scatter as a fraction of flux (~0.028 mag)."""
 
 
-def asinh_error(flux: np.ndarray, sigma: np.ndarray, scale: np.ndarray) -> np.ndarray:
-    """Propagate ``sigma_f`` through ``asinh(f/b)``: ``d asinh/d f = 1/sqrt(f^2+b^2)``."""
-    denominator = np.sqrt(flux**2 + scale**2)
-    return np.where(np.isfinite(sigma), sigma / denominator, np.nan)
+def normalise(
+    flux: np.ndarray,
+    sigma: np.ndarray,
+    mask: np.ndarray,
+    floor_frac: float = RELATIVE_CALIB_FLOOR,
+    norm_index: list[int] | None = None,
+) -> dict[str, np.ndarray]:
+    """Divide every band by the RMS of the norm bands.
 
+    ``flux`` and ``sigma`` are ``(n_objects, n_bands)``; ``sigma`` may be NaN
+    where ``mask`` is 0. ``norm_index`` selects the norm bands (default: g, r, i
+    in canonical order).
 
-def asinh_inverse(x: np.ndarray, scale: np.ndarray) -> np.ndarray:
-    """Exact inverse of :func:`asinh_transform`."""
-    return scale * np.sinh(x)
+    Returns ``g``, ``v`` (float32), ``mask`` (int8), ``logr`` and ``sig_logr``
+    (float32, shape ``(n_objects,)``).
+    """
+    flux = np.asarray(flux, dtype=np.float64)
+    sigma = np.asarray(sigma, dtype=np.float64)
+    mask = np.asarray(mask, dtype=np.float64)
+    if flux.shape != sigma.shape or flux.shape != mask.shape:
+        raise ValueError(f"shape mismatch: flux {flux.shape}, sigma {sigma.shape}")
+    if not np.isfinite(flux).all():
+        raise ValueError("non-finite flux in the interim table")
+    if norm_index is None:
+        norm_index = [BAND_INDEX[b] for b in NORM_BANDS]
 
+    total_sigma = np.sqrt(np.where(mask > 0, sigma, 0.0) ** 2 + (floor_frac * flux) ** 2)
 
-def build_representation(
-    objects: pd.DataFrame, scales: pd.DataFrame, presentation: float = PRESENTATION_SCALE
-) -> pd.DataFrame:
-    """Build ``x``, ``sigma_x`` and ``mask`` from the interim object table."""
-    if list(scales["band"]) != list(BAND_NAMES):
-        raise ValueError("band scales are not in canonical band order")
-    scale = scales["b_j"].to_numpy(dtype=float)
+    f_norm = flux[:, norm_index]
+    m_norm = mask[:, norm_index]
+    s_norm = total_sigma[:, norm_index]
+    n_norm = m_norm.sum(axis=1)
+    if np.any(n_norm == 0):
+        raise ValueError(f"{int((n_norm == 0).sum())} objects have every norm band masked")
+    r2 = (f_norm**2 * m_norm).sum(axis=1) / n_norm
+    if np.any(r2 <= 0):
+        raise ValueError(f"{int((r2 <= 0).sum())} objects have zero norm-band brightness")
+    r = np.sqrt(r2)
 
-    flux = objects[[f"flux_{b}" for b in BAND_NAMES]].to_numpy(dtype=float)
-    sigma = objects[[f"sigma_{b}" for b in BAND_NAMES]].to_numpy(dtype=float)
-    mask = objects[[f"mask_{b}" for b in BAND_NAMES]].to_numpy(dtype=np.int8)
+    g = np.where(mask > 0, flux / r[:, None], 0.0)
+    v = np.where(mask > 0, total_sigma / r[:, None], 0.0)
+    logr = np.log(r)
+    sig_logr = np.sqrt((m_norm * f_norm**2 * s_norm**2).sum(axis=1)) / (n_norm * r2)
 
-    x = asinh_transform(flux, scale) * presentation
-    sigma_x = asinh_error(flux, sigma, scale) * presentation
-    # A masked pixel has a flux but no measured uncertainty. Put it at the
-    # asinh origin, which is unambiguous because real non-detections scatter
-    # around |x| ~ 1, not 0.
-    x[mask == 0] = 0.0
-    sigma_x[mask == 0] = np.nan
+    if not (np.isfinite(g).all() and np.isfinite(v).all()):
+        raise ValueError("non-finite values after normalisation")
+    if not (np.isfinite(logr).all() and np.isfinite(sig_logr).all()):
+        raise ValueError("non-finite brightness or brightness error")
 
-    if not np.isfinite(x).all():
-        raise ValueError("non-finite values in the asinh representation")
-    if np.any(np.isfinite(sigma_x) & (sigma_x <= 0)):
-        raise ValueError("non-positive propagated uncertainty")
-    if np.any(np.isfinite(sigma_x) & (mask == 0)):
-        raise ValueError("sigma defined where the mask says it is not")
-
-    def frame(values: np.ndarray, prefix: str, dtype=None) -> pd.DataFrame:
-        return pd.DataFrame(values, columns=[f"{prefix}{b}" for b in BAND_NAMES], dtype=dtype)
-
-    identifiers = objects[["object_id", "tile_id"]].reset_index(drop=True)
-    representation = pd.concat(
-        [identifiers, frame(x, "x_"), frame(sigma_x, "sigma_x_"), frame(mask, "mask_")], axis=1
-    )
-
-    logger.info(
-        f"x: spread {np.nanstd(x):.2f}, |x| p99 {np.nanpercentile(np.abs(x), 99):.2f}; "
-        f"sigma_x: median {np.nanmedian(sigma_x):.3f}, p99 {np.nanpercentile(sigma_x, 99):.2f}"
-    )
-    logger.info(
-        f"masked pixels: {int((mask == 0).sum()):,} "
-        f"({100 * (mask == 0).mean():.2f}%); "
-        f"objects with a full 60-band spectrum: {int((mask == 1).all(axis=1).sum()):,}"
-    )
-    return representation
-
-
-def check_roundtrip(
-    representation: pd.DataFrame, objects: pd.DataFrame, scales: pd.DataFrame
-) -> None:
-    """Assert ``x -> f`` recovers the flux of every defined pixel."""
-    scale = scales["b_j"].to_numpy(dtype=float)
-    x = representation[[f"x_{b}" for b in BAND_NAMES]].to_numpy(dtype=float) / PRESENTATION_SCALE
-    recovered = asinh_inverse(x, scale)
-    flux = objects[[f"flux_{b}" for b in BAND_NAMES]].to_numpy(dtype=float)
-    mask = objects[[f"mask_{b}" for b in BAND_NAMES]].to_numpy(dtype=np.int8)
-    residual = np.abs(recovered - flux)[mask == 1]
-    tolerance = 1e-8 * (1.0 + np.abs(flux[mask == 1]))
-    if not np.all(residual <= tolerance):
-        raise ValueError(f"asinh round-trip failed; worst residual {residual.max():.3e}")
+    return {
+        "g": g.astype(np.float32),
+        "v": v.astype(np.float32),
+        "mask": mask.astype(np.int8),
+        "logr": logr.astype(np.float32),
+        "sig_logr": sig_logr.astype(np.float32),
+    }
 
 
 def build(
-    objects_path: Path = OBJECTS_FILE,
-    scales_path: Path = BAND_SCALES_FILE,
-    output_path: Path = REPRESENTATION_FILE,
-) -> pd.DataFrame:
+    objects_path: Path = OBJECTS_FILE, output_path: Path = MODEL_DATA_FILE
+) -> dict[str, np.ndarray]:
+    """Write the model-ready arrays with the identifiers the loader needs."""
     objects = pd.read_parquet(objects_path)
-    scales = pd.read_parquet(scales_path)
-    logger.info(f"Loaded {len(objects):,} objects and {len(scales)} band scales")
+    if objects["object_id"].duplicated().any():
+        raise ValueError("duplicated object_id in the interim table")
 
-    representation = build_representation(objects, scales)
-    check_roundtrip(representation, objects, scales)
+    flux = objects[[f"flux_{b}" for b in BAND_NAMES]].to_numpy(dtype=np.float64)
+    sigma = objects[[f"sigma_{b}" for b in BAND_NAMES]].to_numpy(dtype=np.float64)
+    mask = objects[[f"mask_{b}" for b in BAND_NAMES]].to_numpy(dtype=np.int8)
+    arrays = normalise(flux, sigma, mask)
+
+    arrays["object_id"] = objects["object_id"].to_numpy(dtype=str)
+    arrays["tile_id"] = objects["tile_id"].to_numpy(dtype=np.int64)
+    arrays["holdout"] = objects["holdout"].to_numpy(dtype=bool)
+    arrays["quality"] = objects["quality"].to_numpy(dtype=str)
+    arrays["n_bands"] = np.array(N_BANDS, dtype=np.int64)
+    arrays["relative_calib_floor"] = np.array(RELATIVE_CALIB_FLOOR, dtype=np.float64)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    representation.to_parquet(output_path, index=False)
-    logger.success(f"Wrote {output_path} ({len(representation):,} x {representation.shape[1]})")
-    return representation
-
-
-def load_arrays(
-    path: Path = REPRESENTATION_FILE,
-    folds_path: Path | None = None,
-) -> dict[str, np.ndarray]:
-    """Load the representation as plain arrays for model training.
-
-    Returns ``x``, ``sigma_x`` and ``mask`` of shape ``(n_objects, n_bands)``
-    in canonical band order, plus ``object_id``, ``tile_id`` and, when a fold
-    assignment is available, ``fold``. ``sigma_x`` is NaN where ``mask == 0``.
-    """
-    representation = pd.read_parquet(path)
-    arrays = {
-        "x": representation[[f"x_{b}" for b in BAND_NAMES]].to_numpy(dtype=np.float32),
-        "sigma_x": representation[[f"sigma_x_{b}" for b in BAND_NAMES]].to_numpy(dtype=np.float32),
-        "mask": representation[[f"mask_{b}" for b in BAND_NAMES]].to_numpy(dtype=np.int8),
-        "object_id": representation["object_id"].to_numpy(),
-        "tile_id": representation["tile_id"].to_numpy(dtype=np.int64),
-    }
-    if folds_path is None:
-        folds_path = INTERIM_DATA_DIR / "folds.parquet"
-    if folds_path.exists():
-        folds = pd.read_parquet(folds_path)
-        aligned = representation[["object_id"]].merge(folds, on="object_id", how="left")
-        if aligned["fold"].isna().any():
-            raise ValueError("fold assignment does not cover every object")
-        arrays["fold"] = aligned["fold"].to_numpy(dtype=np.int64)
+    np.savez_compressed(output_path, **arrays)
+    snr = 1.0 / np.maximum(arrays["sig_logr"], 1e-12)
+    logger.success(
+        f"Wrote {output_path}: {len(arrays['g']):,} objects, {N_BANDS} bands; "
+        f"r_bb S/N median {np.median(snr):.2f}, p5 {np.percentile(snr, 5):.2f}; "
+        f"masked {100 * (1 - arrays['mask'].mean()):.2f}%"
+    )
     return arrays
 
 
 @app.command()
-def main(
-    objects_path: Path = OBJECTS_FILE,
-    scales_path: Path = BAND_SCALES_FILE,
-    output_path: Path = REPRESENTATION_FILE,
-):
-    build(objects_path, scales_path, output_path)
+def main(objects_path: Path = OBJECTS_FILE, output_path: Path = MODEL_DATA_FILE):
+    build(objects_path, output_path)
 
 
 if __name__ == "__main__":

@@ -82,38 +82,27 @@ create_environment:
 #################################################################################
 
 
-## Raw export -> interim object table (flux, sigma, mask) + band scales
+## Raw export -> interim object table (flux, sigma, mask, holdout, quality)
 .PHONY: interim
 interim: requirements
 	$(PYTHON_INTERPRETER) -m jpas_da.dataset
 
 
-## Interim object table -> asinh representation (x, sigma_x, mask)
-.PHONY: features
-features: interim
-	$(PYTHON_INTERPRETER) -m jpas_da.features
-
-
-## Leave-one-tile-out fold assignment
+## Tile rotations (train/val/test) plus holdout and excluded rows
 .PHONY: splits
 splits: interim
 	$(PYTHON_INTERPRETER) -m jpas_da.splits
 
 
-## Everything the models need: interim table, representation, folds
-.PHONY: datasets
-datasets: features splits
-
-
-## Model-ready arrays: RMS shape/scale decomposition onto the fold assignment
-.PHONY: model-data
-model-data: datasets
-	$(PYTHON_INTERPRETER) -m jpas_da.modeling.data
+## Interim table -> model-ready arrays (broad-band RMS normalisation)
+.PHONY: features
+features: interim
+	$(PYTHON_INTERPRETER) -m jpas_da.features
 
 
 ## Raw export -> the final model-ready dataset under data/processed
 .PHONY: data
-data: model-data
+data: features splits
 	@echo ">>> data/processed: $$(ls data/processed | tr '\n' ' ')"
 
 

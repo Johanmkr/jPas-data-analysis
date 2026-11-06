@@ -55,7 +55,6 @@ app = typer.Typer()
 
 RAW_FILE = RAW_DATA_DIR / "miniJpas_fluxes_errors_redshifts_full.csv"
 OBJECTS_FILE = INTERIM_DATA_DIR / "objects.parquet"
-BAND_SCALES_FILE = INTERIM_DATA_DIR / "band_scales.parquet"
 
 # Non-photometric columns. Kept in the interim table as metadata so that later
 # inference work never has to re-read the 75 MB CSV, and so that any accidental
@@ -257,42 +256,6 @@ def build_photometry(
     return frame(flux, "flux_"), frame(sigma, "sigma_"), frame(defined.astype("int8"), "mask_")
 
 
-def band_scales(objects: pd.DataFrame) -> pd.DataFrame:
-    """Per-band soft scale ``b_j = median |sigma_f|`` over the whole sample.
-
-    ``b_j`` is the pivot of the asinh representation (see
-    :mod:`jpas_da.features`): it separates the noise-dominated part of each
-    band (linear regime) from the source-dominated part (log regime).
-
-    It is computed globally, not per tile, and that is deliberate. Median
-    log-sigma differs between tiles by 0.16 dex typically and up to 0.37 dex in
-    the worst bands, so a held-out tile does sit off-centre in ``x``. That
-    offset is a real property of the survey depth and leave-one-tile-out is
-    supposed to expose it; hiding it inside the normalisation would make the
-    held-out field look easier than it is.
-    """
-    sigma = objects[[f"sigma_{b}" for b in BAND_NAMES]].to_numpy(dtype=float)
-    with np.errstate(invalid="ignore"):
-        finite = np.isfinite(sigma)
-        positive = sigma > 0
-        median_sigma = np.array(
-            [np.median(sigma[:, j][finite[:, j] & positive[:, j]]) for j in range(sigma.shape[1])]
-        )
-    n_defined = finite.sum(axis=0)
-    scale = pd.DataFrame(
-        {
-            "band": list(BAND_NAMES),
-            "b_j": median_sigma,
-            "n_sigma_defined": n_defined,
-            "n_sigma_used": (finite & positive).sum(axis=0),
-        }
-    )
-    if not np.isfinite(scale["b_j"]).all() or (scale["b_j"] <= 0).any():
-        bad = scale.loc[~np.isfinite(scale["b_j"]) | (scale["b_j"] <= 0), "band"].tolist()
-        raise ValueError(f"could not derive a positive b_j for bands: {bad}")
-    return scale
-
-
 def build_interim(raw_path: Path = RAW_FILE, output_path: Path = OBJECTS_FILE) -> pd.DataFrame:
     data = load_raw(raw_path)
     validate_columns(data)
@@ -330,11 +293,6 @@ def build_interim(raw_path: Path = RAW_FILE, output_path: Path = OBJECTS_FILE) -
     output_path.parent.mkdir(parents=True, exist_ok=True)
     objects.to_parquet(output_path, index=False)
     logger.success(f"Wrote {output_path} ({len(objects):,} objects, {objects.shape[1]} columns)")
-
-    scales = band_scales(objects)
-    scales_path = output_path.with_name(BAND_SCALES_FILE.name)
-    scales.to_parquet(scales_path, index=False)
-    logger.success(f"Wrote {scales_path}")
 
     logger.info(
         "zph usable: {:,} | zsp usable: {:,} | spCLASS: {:,}".format(
