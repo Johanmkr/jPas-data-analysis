@@ -61,7 +61,8 @@ Order and wavelengths live in `jpas_da/bands.py`; 60 channels in four blocks:
 | `number` | object number within the tile | |
 | `ALPHA_J2000`, `DELTA_J2000` | sky position (deg) | |
 | `MAGrSDSS` | SDSS r magnitude | **leak**: exactly `26.1147 - 2.5*log10(rSDSS)`; 99 -> NaN |
-| `flag_rSDSS`, `mask_flag_rSDSS` | SExtractor flags in r | |
+| `flag_rSDSS` | SExtractor `FLAGS` in r, sum of bits | 1 neighbours or bad pixels (4,027), 2 blended (5,166), 4 saturated (59), 8 truncated at image edge (20), 16 incomplete/corrupted aperture data (219), 32/64/128 not present |
+| `mask_flag_rSDSS` | miniJPAS `MASK_FLAGS` in r, sum of bits (Bonoli et al. 2021, Table 6) | 0 not masked (56,731), 1 outside the window frame: normalised weight map < 85%, less exposure (6,034 with the bit), 2 bright star or near one (3,445), 4 artefact (not present). Values seen: 1 (4,117), 2 (1,528), 3 (1,917) |
 | `SEtractor` | SExtractor `CLASS_STAR` | consistently separated from `photoCLASSsdss` (cross-tab in the profiling run) |
 | `photoCLASSsdss` | SDSS photo class | 3 = galaxy, 6 = point source, NaN = not matched |
 | `spCLASSsdss` | SDSS spectral class | GALAXY / STAR / QSO |

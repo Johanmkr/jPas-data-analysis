@@ -15,7 +15,7 @@ floor (Sec. B3), and the shape-only unit-sphere target.
 | Inference holdout | the 1,168 objects with SDSS spectra (`spCLASSsdss` set) | all 19,873 SDSS matches (training would be ~2 mag fainter than inference) |
 | Training | unsupervised; label-based inference is a later goal | probes now |
 | Splits | rotate over the 4 tiles: 2 train / 1 val / 1 test, 4 rotations | 3/1 without test; random split |
-| Quality | drop severe flags from training, keep neighbours/blends; store a `quality` column | strict `flag==0`; keep all |
+| Quality | drop severe flags (FLAGS ≥ 4, bright-star mask) from training; keep blends and window-frame objects; store a `quality` column | strict `flag==0`; keep all |
 | Object types | stars, galaxies and QSOs all kept | galaxies only |
 | Brightness | `r_bb` = RMS of measured gSDSS, rSDSS, iSDSS; all 60 bands divided by it | narrow-band RMS (current); rSDSS alone; debiased 60-band RMS |
 | Extra features | none (photometry only); morphology later as an ablation | CLASS_STAR, flags |
@@ -46,12 +46,17 @@ From `data/interim/objects.parquet` (64,293 objects after removing duplicates):
   the object's brightness.
 - 23 pixels have |relerr| = 65504 (float16 maximum): capped, so σ is
   underestimated.
-- Quality: `flag_rSDSS` ≠ 0 for 6,581 objects (values 1/2/3 = neighbours /
-  blended / both; 4 = saturated, 16 = truncated, ...). `mask_flag_rSDSS` ≠ 0 for
-  7,562 (values 1, 2, 3; meaning not yet documented). Severe cut as currently
-  defined (flag bits ≥ 4, or `mask_flag` ≠ 0) removes 7,616 objects.
+- Quality (bit meanings in `references/data_dictionary.md`): `flag_rSDSS`
+  (SExtractor FLAGS) has bit 1 (neighbours/bad pixels) on 4,027 objects and
+  bit 2 (blended) on 5,166; only 282 have a bit ≥ 4 (59 saturated, 20
+  truncated, 219 incomplete aperture). `mask_flag_rSDSS` (MASK_FLAGS, Bonoli
+  et al. 2021, Table 6): 1 = outside the window frame (normalised weight map
+  < 85%, i.e. less exposure), 2 = bright star or near one, 4 = artefact (absent
+  here). Bit 1 is set on 6,034 objects, bit 2 on 3,445. The severe cut
+  (FLAGS bit ≥ 4, or MASK_FLAGS bit 2) removes 3,672 objects.
 - Cross-tile duplicates within 1″: 12 pairs, so the tile split does not leak.
-- Training pool after holdout and severe cut: 55,613 objects.
+- Training pool after holdout and severe cut: 59,486 objects (3,873 of them
+  only outside the window frame).
 
 ## A. Data processing pipeline
 
@@ -65,13 +70,15 @@ From `data/interim/objects.parquet` (64,293 objects after removing duplicates):
   `references/data_dictionary.md`.
 
 ### A2. Quality and sample selection (`data-selection`)
-- Add a `quality` column in `dataset.py`: `clean` / `blend` (flag bits 1, 2
-  only) / `severe` (flag bits ≥ 4, or `mask_flag` ≠ 0).
-- **Open, resolve first:** what `mask_flag_rSDSS` values 1/2/3 mean (miniJPAS
-  documentation, Bonoli et al. 2021; ask the literature agent). If a value turns
-  out to be harmless, it moves from `severe` to `clean`. The 7,616 figure above
-  will change accordingly.
-- Training uses `clean` + `blend`. Predictions are still written for every
+- Add a `quality` column in `dataset.py`, first match wins:
+  `severe` (FLAGS bit ≥ 4, or MASK_FLAGS bit 2 = bright star) /
+  `window` (MASK_FLAGS bit 1 only) / `blend` (FLAGS bits 1, 2 only) / `clean`.
+- Resolved 2026-11-06 from Bonoli et al. (2021), Table 6: the bright-star bit
+  means the photometry is contaminated, so it is severe. The window bit only
+  means less exposure: shallower, but the quoted errors already carry that, so
+  window objects stay in training as their own class. Evaluation reports them
+  separately; if they reconstruct clearly worse, move them to `severe`.
+- Training uses `clean` + `blend` + `window`. Predictions are still written for every
   object, with `quality` attached.
 - Set the 23 pixels with capped relerr to `mask = 0`.
 - Stars, galaxies and QSOs are all kept.
@@ -193,8 +200,9 @@ data-eda ────┴─▶ data-selection ─▶ data-preprocessing ─▶ d
 
 ## Open items
 
-1. Meaning of `mask_flag_rSDSS` values 1/2/3 (A2), which sets the severe cut.
-2. ε default after redoing the Fisher-spread check (B5).
+1. ~~Meaning of `mask_flag_rSDSS`~~ resolved (A2). Remaining: confirm that
+   `window` objects reconstruct no worse than `clean` ones (C).
+2. ε default after redoing the Fisher-spread check (B3).
 3. Whether to debias `r_bb` for faint objects (A4).
 4. Conv widths and depth; whether `sig_logr` enters the encoder as a condition.
 5. Later goal, out of scope here: label-based inference on the holdout
