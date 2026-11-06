@@ -213,6 +213,49 @@ data-eda ────┴─▶ data-selection ─▶ data-preprocessing ─▶ d
                              └──▶ vae2-sweep ─▶ eval-report
 ```
 
+## Results of the first sweep (2026-11-06)
+
+20 VAE runs (latent 4/8/16 × 4 rotations; MLP encoder and `[g, mask]` at
+d = 8 × 4 rotations), 50 epochs each, on CPU; baselines at the same sizes. The
+full table is `reports/sweep_v2.md` (`make report`). Pooled test chi2/dof, mean
+over rotations, ± half the range:
+
+| model | d = 4 | d = 8 | d = 16 | active dims (d = 4/8/16) |
+|---|---|---|---|---|
+| VAE, conv encoder | 1.390 ±0.03 | 1.400 ±0.05 | 1.434 ±0.10 | 4.0 / 3.8 / 4.2 |
+| VAE, `[g, mask]` | – | 1.385 ±0.04 | – | – / 4.5 / – |
+| VAE, MLP encoder | – | 1.454 ±0.07 | – | – / 5.2 / – |
+| weighted PCA | 1.363 ±0.02 | 1.219 ±0.02 | 0.972 ±0.01 | – |
+| asinh PCA | 1.713 ±0.07 | 1.543 ±0.03 | 1.290 ±0.03 | – |
+
+What it says:
+
+1. **At β = 1 the VAE uses about 4 latent dimensions, whatever size it is
+   given** (total KL ≈ 3 nats). It matches weighted PCA at d = 4 and loses to it
+   at d = 8 and 16, where the extra dimensions stay at KL ≈ 0. This is the same
+   partial posterior collapse the old project hit at β = 1. With per-band S/N
+   ~1, the ELBO judges more latent information not worth its KL cost.
+   Weighted PCA pays no such cost: it fits free coefficients to every test
+   object, so it is an upper bound for an encoder, not an equal competitor.
+2. **The convolutions help**: the MLP encoder is worse overall (1.454) and
+   much worse on bright objects (S/N > 30: 1.30 against 0.95) and window-frame
+   objects.
+3. **Dropping `v` from the encoder costs nothing** (1.385 against 1.400, within
+   the rotation spread) and removes most of the depth information from the
+   encoder input.
+4. **Window-frame objects reconstruct ~35% worse than clean ones** (chi2/dof
+   ratio 1.34 for the VAE, 1.28 for weighted PCA), although their errors already
+   carry the lower exposure. By the rule in A2 that argues for moving them to
+   `severe`.
+5. Asinh PCA is the weakest baseline at every size, as expected for a model
+   without a noise model. Several runs pick their best epoch near epoch 50, and
+   validation losses still move by a few units late in training (constant
+   learning rate), so longer runs or a learning-rate schedule may help a little.
+
+Choice for now: conv encoder, d = 8 (the default), since every size ends up
+with ~4 active dimensions and d = 8 leaves room. The decisions that follow from
+1, 3 and 4 are open items below.
+
 ## Open items
 
 1. ~~Meaning of `mask_flag_rSDSS`~~ resolved (A2). Remaining: confirm that
@@ -220,5 +263,11 @@ data-eda ────┴─▶ data-selection ─▶ data-preprocessing ─▶ d
 2. ~~ε default~~ resolved: 0.1 (B3). A later ε sweep is optional.
 3. Whether to debias `r_bb` for faint objects (A4).
 4. Conv widths and depth; whether `sig_logr` enters the encoder as a condition.
-5. Later goal, out of scope here: label-based inference on the holdout
+5. **Posterior collapse at β = 1** (result 1): decide between β < 1, a
+   free-bits / KL floor per dimension, or accepting ~4 dimensions as what the
+   data supports at this noise level.
+6. **Default channels** (result 3): switch the default to `[g, mask]`?
+7. **Window-frame objects** (result 4): move them to `severe` and rerun?
+8. Learning-rate schedule / longer training (result 5).
+9. Later goal, out of scope here: label-based inference on the holdout
    (redshift, class, anomalies) and morphology as an extra feature.
