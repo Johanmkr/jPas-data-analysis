@@ -138,7 +138,7 @@ logr, sig_logr = log r, sqrt( sum_j g_j^2 v_j^2 )
   (`loss.floor_percentile`) and fixed, because the quoted error is purely
   relative and vanishes with the flux.
 
-`vae-normalisation-and-loss.md` has the measurements and derivations behind
+`references/vae-normalisation-and-loss.md` (partly superseded by `references/pipeline-v2-plan.md`) has the measurements and derivations behind
 these choices.
 
 Training writes `models/vae.pt` (weights, architecture, noise floor and the
