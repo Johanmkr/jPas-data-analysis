@@ -82,6 +82,7 @@ flowchart LR
 | `make data` | raw export → interim table, splits, `vae_inputs.npz` |
 | `make train` | one rotation (`data.rotation`); `DEBUG=1` for the tiny smoke run (`CONFIG=`, `SET="--set ..."`) |
 | `make train-debug` | 1024 objects, 2 epochs — smoke test |
+| `make baselines` | weighted PCA on `g` and PCA in asinh space at sizes 4/8/16, every rotation → `reports/runs/baselines.json` |
 | `make predict` | encode every object (all roles, incl. holdout) into `models/vae_latents.parquet` |
 | `make docker-build` / `make docker-train` | build the CPU image, run the debug path in it |
 | `make smoke` | `train-debug` plus `pytest` |

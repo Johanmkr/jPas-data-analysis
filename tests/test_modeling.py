@@ -406,3 +406,46 @@ def test_train_and_predict_run_end_to_end(tmp_path):
     assert (table.loc[arrays["holdout"], "role"] == "holdout").all()
     expected = model_data.roles(arrays, 1).astype(str)
     np.testing.assert_array_equal(table["role"].to_numpy(), expected)
+
+
+# --------------------------------------------------------------------------- #
+# baselines
+# --------------------------------------------------------------------------- #
+def test_weighted_pca_recovers_a_noiseless_low_rank_signal():
+    from jpas_da.modeling.baselines import WeightedPCA
+
+    rng = np.random.default_rng(0)
+    basis = rng.normal(size=(2, 20))
+    g = 1.0 + rng.normal(size=(300, 2)) @ basis
+    w2 = rng.uniform(0.01, 1.0, size=g.shape)  # unequal weights must not matter
+    mask = np.ones_like(g)
+    mask[::5, 3] = 0
+    model = WeightedPCA(2, n_iter=50).fit(g, w2, mask)
+    np.testing.assert_allclose(model.reconstruct(g, w2, mask), g, atol=1e-5)
+
+
+def test_weighted_pca_downweights_noisy_cells():
+    """A huge error on one cell must not pull the fit towards that cell."""
+    from jpas_da.modeling.baselines import WeightedPCA
+
+    rng = np.random.default_rng(1)
+    g = np.outer(rng.normal(size=200), np.linspace(1, 2, 10))
+    corrupted = g.copy()
+    corrupted[0, 0] += 1e3
+    w2 = np.full(g.shape, 0.01)
+    w2[0, 0] = 1e8
+    model = WeightedPCA(1, n_iter=50).fit(corrupted, w2, np.ones_like(g))
+    clean_rows = model.reconstruct(g[1:], w2[1:], np.ones_like(g[1:]))
+    np.testing.assert_allclose(clean_rows, g[1:], atol=1e-3)
+
+
+def test_asinh_pca_at_full_rank_reproduces_the_measured_shape():
+    from jpas_da.modeling.baselines import AsinhPCA
+
+    rng = np.random.default_rng(2)
+    g = rng.normal(1.0, 0.5, size=(100, 8))
+    v = np.full_like(g, 0.2)
+    mask = np.ones_like(g)
+    logr = rng.normal(4.0, 1.0, 100)
+    model = AsinhPCA(8).fit(g, v, mask, logr)
+    np.testing.assert_allclose(model.reconstruct(g, v, mask, logr), g, atol=1e-8)

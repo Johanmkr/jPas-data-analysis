@@ -124,6 +124,12 @@ predict: data
 	$(PYTHON_INTERPRETER) -m jpas_da.modeling.predict
 
 
+## Weighted-PCA and asinh-PCA baselines on every rotation (sizes 4/8/16)
+.PHONY: baselines
+baselines: data
+	$(PYTHON_INTERPRETER) -m jpas_da.modeling.baselines
+
+
 ## Build the CPU training image
 .PHONY: docker-build
 docker-build:
