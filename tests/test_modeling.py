@@ -449,3 +449,52 @@ def test_asinh_pca_at_full_rank_reproduces_the_measured_shape():
     logr = rng.normal(4.0, 1.0, 100)
     model = AsinhPCA(8).fit(g, v, mask, logr)
     np.testing.assert_allclose(model.reconstruct(g, v, mask, logr), g, atol=1e-8)
+
+
+# --------------------------------------------------------------------------- #
+# sweep and report
+# --------------------------------------------------------------------------- #
+def test_size_sweep_covers_every_size_and_rotation():
+    from jpas_da.modeling.sweep import run_specs
+
+    specs = run_specs("size")
+    assert len(specs) == 12
+    assert len({name for name, _ in specs}) == 12
+    assert ("conv-d8-r2", ["model.latent_dim=8", "data.rotation=2"]) in specs
+
+
+def test_ablation_sweep_uses_the_chosen_size():
+    from jpas_da.modeling.sweep import run_specs
+
+    specs = run_specs("ablation", dim=4)
+    assert len(specs) == 8
+    assert all("model.latent_dim=4" in overrides for _, overrides in specs)
+
+
+def test_report_groups_runs_by_model_and_size(tmp_path):
+    import json
+
+    from jpas_da.modeling.report import collect, render
+
+    def recon(value):
+        summary = {"chi2_dof_pooled": value, "chi2_dof_median": value, "n": 10}
+        return {
+            "overall": summary,
+            "by_snr": {"0-3": summary, ">30": summary},
+            "by_tile": {},
+            "by_quality": {"clean": summary, "window": summary},
+        }
+
+    for rot, value in ((0, 1.0), (1, 1.2)):
+        run = tmp_path / f"conv-d8-r{rot}"
+        run.mkdir()
+        metrics = {
+            "test": {"reconstruction": recon(value), "latent": {"active_dims": 6}},
+            "best_epoch": 40,
+            "config": {"train": {"epochs": 50}},
+        }
+        (run / "metrics.json").write_text(json.dumps(metrics))
+    groups = collect(tmp_path)
+    assert list(groups) == [("vae-conv", 8)]
+    text = render(groups)
+    assert "| vae-conv | 8 | 2 | 1.100 ±0.100 |" in text

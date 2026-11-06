@@ -130,6 +130,21 @@ baselines: data
 	$(PYTHON_INTERPRETER) -m jpas_da.modeling.baselines
 
 
+## Local sweep: STAGE=size (latent 4/8/16 x 4 rotations) or STAGE=ablation DIM=<d>
+STAGE ?= size
+DIM ?= 8
+JOBS ?= 3
+.PHONY: sweep
+sweep: data
+	$(PYTHON_INTERPRETER) -m jpas_da.modeling.sweep --stage $(STAGE) --dim $(DIM) --jobs $(JOBS)
+
+
+## Collect sweep runs and baselines into reports/sweep_v2.md
+.PHONY: report
+report:
+	$(PYTHON_INTERPRETER) -m jpas_da.modeling.report
+
+
 ## Build the CPU training image
 .PHONY: docker-build
 docker-build:
