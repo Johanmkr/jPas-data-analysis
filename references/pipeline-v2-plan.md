@@ -150,10 +150,25 @@ sig_logr = delta-method error of log r_bb from the g/r/i errors
 
 ### B3. Likelihood (`vae2-cvae`)
 - Gaussian with known variance: `w_j² = v_j² + ε² (+ (g_j·sig_logr)²)`.
-- `ε` is fixed in the config. Default 0.01, as a uniform floor; per-band ε is
-  an option. Before fixing the default, redo the Fisher-spread check (the share
-  of total weight held by the top objects) under the `r_bb` normaliser,
-  on training tiles only.
+- `ε` is fixed in the config, per-band ε is an option. **Default 0.1**,
+  chosen from the Fisher-spread check on the training tiles. The starting value
+  of 0.01 was set for the unit-sphere normaliser, where |g| ≈ 1/√60; under
+  `r_bb` the median |g| is ≈ 1.1, so the same ε is ~8× weaker. Rotation 0,
+  training tiles, common-mode term on:
+
+  | ε | objects holding 50% / 90% of the weight | stars' share (9% of objects) | cells where ε > v |
+  |---|---|---|---|
+  | 0.0001 | 0.7% / 5.5% | 0.80 | – |
+  | 0.01 | 1.4% / 8.5% | 0.72 | – |
+  | 0.03 | 2.2% / 14.7% | 0.61 | 1.3% |
+  | 0.05 | 3.0% / 22.2% | 0.53 | 2.8% |
+  | **0.1** | **5.5% / 38.3%** | **0.39** | **5.4%** |
+  | 0.15 | 8.2% / 48.6% | 0.31 | 7.8% |
+  | 0.2 | 10.9% / 55.2% | 0.26 | 10.4% |
+
+  0.1 binds on about 5% of cells, like the old percentile rule, and the other
+  rotations agree to within a percent. Stars still hold more weight than their
+  number; ε is a natural knob for a later sweep.
 - Loss registry: `gaussian_nll` (its `log w²` term is a constant with fixed
   variance; the docstring says so), `student_t` kept, `mse` kept as the
   unweighted contrast case. `weighted_mse` is removed: it has the same
@@ -202,7 +217,7 @@ data-eda ────┴─▶ data-selection ─▶ data-preprocessing ─▶ d
 
 1. ~~Meaning of `mask_flag_rSDSS`~~ resolved (A2). Remaining: confirm that
    `window` objects reconstruct no worse than `clean` ones (C).
-2. ε default after redoing the Fisher-spread check (B3).
+2. ~~ε default~~ resolved: 0.1 (B3). A later ε sweep is optional.
 3. Whether to debias `r_bb` for faint objects (A4).
 4. Conv widths and depth; whether `sig_logr` enters the encoder as a condition.
 5. Later goal, out of scope here: label-based inference on the holdout

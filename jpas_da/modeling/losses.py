@@ -1,125 +1,113 @@
-"""Reconstruction terms, as a registry keyed by name.
+"""Noise model and reconstruction terms.
 
-A loss here owns exactly one thing: how a decoder prediction ``mu`` is scored
-against the measured shape ``g`` given the propagated error ``v`` and the mask.
-The KL term and the brightness head are handled by the training loop, because
-they are properties of the variational model rather than of the noise model.
+The per-cell variance is known, not learned::
 
-Every function has the same signature and returns one value per object, summed
-over bands::
+    w_j^2 = v_j^2 + eps_j^2 (+ (g_j * sig_logr)^2)      0 where mask_j = 0
 
-    loss(g, v, mask, mu, s_floor) -> Tensor   # shape (N,)
+* ``v_j`` is the propagated measurement error, already carrying the 0.026
+  relative calibration term (:mod:`jpas_da.features`).
+* ``eps`` is a fixed floor *relative to the object's brightness*: no band is
+  known better than ``eps * r_bb``. It is needed because, after dividing by
+  ``r_bb``, very bright objects really are measured very precisely -- the
+  smallest ``v`` in the catalogue belongs to an object ~8000x brighter than the
+  median -- and without a floor a handful of them hold most of the Fisher
+  information. It is not that the archive error vanishes at low flux: it does
+  not (no measured pixel has sigma below 0.064x its band median). A cap
+  proportional to ``|g|`` would not help: the 0.026 term already caps per-band
+  S/N at ~38, and the extreme weights sit on near-zero-flux bands of bright
+  objects, where ``|g| ~ 0``.
+* ``(g_j * sig_logr)^2`` is the error that dividing by a noisy ``r_bb`` adds to
+  every band. It is perfectly correlated across bands; the diagonal term
+  overstates its independence (``loss.common_mode``).
 
-``mask`` is 1/0 per band, ``v`` is zero where the mask is zero, and ``s_floor``
-is the fixed per-band additive error floor derived on the training fold.
+A reconstruction term scores ``mu`` against ``g`` given ``w2`` and the mask and
+returns one value per object, summed over bands::
 
-Adding a noise model is adding one entry to :data:`LOSSES` plus, if it has
-parameters, one field in ``LossConfig``.
+    loss(g, mu, w2, mask) -> Tensor   # shape (N,)
+
+The KL term belongs to the training loop.
 """
 
+from __future__ import annotations
+
+import math
 from typing import Protocol
 
 import torch
 
 
 class ReconstructionLoss(Protocol):
-    """Score a decoder prediction; returns one value per object."""
-
     def __call__(
         self,
         g: torch.Tensor,
-        v: torch.Tensor,
-        mask: torch.Tensor,
         mu: torch.Tensor,
-        s_floor: torch.Tensor,
+        w2: torch.Tensor,
+        mask: torch.Tensor,
         **kwargs: object,
     ) -> torch.Tensor: ...
 
 
-def _weights(v: torch.Tensor, s_floor: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    """Per-cell variance ``w^2 = v^2 + s^2``, zero on masked bands."""
-    return (v**2 + s_floor**2) * mask
-
-
-def gaussian_nll(
+def noise_variance(
     g: torch.Tensor,
     v: torch.Tensor,
     mask: torch.Tensor,
-    mu: torch.Tensor,
-    s_floor: torch.Tensor,
-    **_: object,
+    sig_logr: torch.Tensor,
+    eps: torch.Tensor | float,
+    common_mode: bool = True,
 ) -> torch.Tensor:
-    """Gaussian negative log-likelihood with known, per-cell variance.
+    """Per-cell variance ``w^2``, zero on masked bands."""
+    eps = torch.as_tensor(eps, dtype=v.dtype, device=v.device)
+    w2 = v**2 + eps**2
+    if common_mode:
+        w2 = w2 + (g * sig_logr.unsqueeze(-1)) ** 2
+    return w2 * mask
 
-    Includes the ``0.5 log w^2`` noise-normalisation term: without it the band
-    budget is set by noise rather than by information.
+
+def gaussian_nll(g, mu, w2, mask, **_: object) -> torch.Tensor:
+    """Gaussian negative log-likelihood with known per-cell variance.
+
+    ``w2`` does not depend on the parameters, so the ``log(2 pi w2)`` term is a
+    constant: it changes the reported value (making it a proper NLL comparable
+    across models), not the gradients.
     """
-    w2 = _weights(v, s_floor, mask)
-    w2 = w2.clamp_min(1e-12) * mask
-    residual = (g - mu) ** 2 / w2.clamp_min(1e-12)
-    cell = 0.5 * (residual + torch.log(w2.clamp_min(1e-12)))
+    safe = w2.clamp_min(1e-12)
+    cell = 0.5 * ((g - mu) ** 2 / safe + torch.log(2 * math.pi * safe))
     return (cell * mask).sum(-1)
 
 
-def student_t(
-    g: torch.Tensor,
-    v: torch.Tensor,
-    mask: torch.Tensor,
-    mu: torch.Tensor,
-    s_floor: torch.Tensor,
-    *,
-    dof: float = 5.0,
-    **_: object,
-) -> torch.Tensor:
-    """Heavy-tailed alternative to :func:`gaussian_nll`, same scale ``w``.
+def student_t(g, mu, w2, mask, *, dof: float = 5.0, **_: object) -> torch.Tensor:
+    """Heavy-tailed alternative with the same scale ``w``, normalisation dropped.
 
-    Use it to test whether the latent geometry is being set by gross outliers:
-    if the embedding is unchanged, the Gaussian was not outlier-driven.
+    Use it to test whether the latent geometry is set by gross outliers: if the
+    embedding is unchanged, the Gaussian was not outlier-driven.
     """
     if dof <= 0:
         raise ValueError("student_t dof must be positive")
-    w2 = (_weights(v, s_floor, mask) * mask).clamp_min(1e-12)
-    residual = (g - mu) ** 2 / w2
+    residual = (g - mu) ** 2 / w2.clamp_min(1e-12)
     cell = 0.5 * (dof + 1.0) * torch.log1p(residual / dof)
     return (cell * mask).sum(-1)
 
 
-def weighted_mse(
-    g: torch.Tensor,
-    v: torch.Tensor,
-    mask: torch.Tensor,
-    mu: torch.Tensor,
-    s_floor: torch.Tensor,
-    **_: object,
-) -> torch.Tensor:
-    """Inverse-variance weighted squared error, no log term.
-
-    Kept as the documented contrast case: it allocates the loss budget in
-    proportion to the noise variance, so the shallowest bands dominate.
-    """
-    w2 = (_weights(v, s_floor, mask) * mask).clamp_min(1e-12)
-    return (0.5 * (g - mu) ** 2 / w2 * mask).sum(-1)
-
-
-def mse(
-    g: torch.Tensor,
-    v: torch.Tensor,
-    mask: torch.Tensor,
-    mu: torch.Tensor,
-    s_floor: torch.Tensor,
-    **_: object,
-) -> torch.Tensor:
-    """Unweighted squared error; every band counts the same."""
+def mse(g, mu, w2, mask, **_: object) -> torch.Tensor:
+    """Unweighted squared error: the contrast case that ignores the noise."""
     return (0.5 * (g - mu) ** 2 * mask).sum(-1)
+
+
+def chi2(g, mu, w2, mask) -> torch.Tensor:
+    """Per-object chi-square ``sum_j m_j (g_j - mu_j)^2 / w_j^2``."""
+    return (((g - mu) ** 2 / w2.clamp_min(1e-12)) * mask).sum(-1)
 
 
 LOSSES: dict[str, ReconstructionLoss] = {
     "gaussian_nll": gaussian_nll,
     "student_t": student_t,
-    "weighted_mse": weighted_mse,
     "mse": mse,
 }
-"""Name -> reconstruction term. ``loss.name`` in the config selects one."""
+"""Name -> reconstruction term. ``loss.name`` in the config selects one.
+
+``weighted_mse`` was removed: with a fixed variance it has exactly the gradients
+of ``gaussian_nll``.
+"""
 
 
 def get_loss(name: str) -> ReconstructionLoss:

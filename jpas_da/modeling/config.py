@@ -18,36 +18,46 @@ from typing import Any, get_args, get_origin, get_type_hints
 import yaml
 
 from jpas_da.config import MODELS_DIR, PROCESSED_DATA_DIR, REPORTS_DIR
-
-CHANNELS = ("g", "v", "mask")
-"""Encoder input channels, each one ``n_bands`` wide over the band axis."""
+from jpas_da.modeling.data import CHANNELS, CONDITIONS
+from jpas_da.modeling.vae import ENCODERS
 
 
 @dataclass
 class DataConfig:
     path: Path = PROCESSED_DATA_DIR / "vae_inputs.npz"
-    fold: int = 0
-    """Leave-one-tile-out fold used for validation."""
+    rotation: int = 0
+    """Tile rotation: test = tile k, validation = tile k+1, training = the rest."""
 
 
 @dataclass
 class ModelConfig:
+    encoder: str = "conv"
+    """``conv`` (two-branch) or ``mlp`` (everything flattened; the ablation)."""
+
     channels: tuple[str, ...] = CHANNELS
     """Subset of ``("g", "v", "mask")`` fed to the encoder."""
 
-    latent_dim: int = 6
+    conditions: tuple[str, ...] = ("logr",)
+    """Per-object conditions given to encoder and decoder; must include logr."""
 
-    hidden: tuple[int, ...] = (256, 128)
-    """Layer widths, one entry per convolutional encoder block."""
+    latent_dim: int = 8
+
+    conv_channels: tuple[int, ...] = (32, 64)
+    """Widths of the convolutions over the 54 narrow bands."""
 
     kernel_size: int = 5
-    """Odd convolution width along the band axis."""
+    """Odd convolution width along the narrow-band axis."""
+
+    narrow_features: int = 128
+    """Width of the linear layer after flattening the narrow branch."""
+
+    other_hidden: tuple[int, ...] = (64,)
+    """MLP widths for the six off-grid bands plus the conditions."""
+
+    hidden: tuple[int, ...] = (256, 128)
+    """Encoder head widths; the decoder mirrors them in reverse."""
 
     dropout: float = 0.0
-    """Dropout after every hidden layer of the encoder and decoder."""
-
-    scale_head: bool = True
-    """Predict ``log r`` from the latent (brightness head)."""
 
 
 @dataclass
@@ -55,17 +65,25 @@ class LossConfig:
     name: str = "gaussian_nll"
     """Key of :data:`jpas_da.modeling.losses.LOSSES`."""
 
-    beta: float = 3.0
-    """KL weight after warm-up."""
+    beta: float = 1.0
+    """KL weight after warm-up (1 = the standard ELBO)."""
 
     beta_warmup_fraction: float = 0.25
     """Fraction of the run over which ``beta`` ramps linearly from 0."""
 
-    floor_percentile: float = 5.0
-    """Per-band additive error floor, as a percentile of ``v`` on train."""
+    eps: float = 0.1
+    """Brightness-relative floor: no band is known better than ``eps * r_bb``.
 
-    systematic_scale: float = 0.037
-    """Absolute-calibration floor on ``log r``, 0.04 mag in natural log."""
+    0.1 binds on ~5% of training cells. On rotation 0 it moves the share of the
+    total weight held by the top objects from 50% in 1.4% of objects (eps =
+    0.01) to 50% in 5.5%, and the stars' share from 0.72 to 0.39 (see
+    references/pipeline-v2-plan.md, B3)."""
+
+    eps_per_band: tuple[float, ...] = ()
+    """Optional per-band floor (60 values); overrides ``eps`` when given."""
+
+    common_mode: bool = True
+    """Add the shared error of ``r_bb``, ``(g * sig_logr)^2``, to every band."""
 
     student_t_dof: float = 5.0
     """Degrees of freedom when ``name == "student_t"``."""
@@ -107,36 +125,47 @@ class Config:
     output: OutputConfig = field(default_factory=OutputConfig)
 
     def validate(self) -> Config:
-        unknown = set(self.model.channels) - set(CHANNELS)
+        model, loss, train = self.model, self.loss, self.train
+        if self.data.rotation < 0:
+            raise ValueError("data.rotation must be >= 0")
+        if model.encoder not in ENCODERS:
+            raise ValueError(f"unknown encoder {model.encoder!r}; allowed: {list(ENCODERS)}")
+        unknown = set(model.channels) - set(CHANNELS)
         if unknown:
             raise ValueError(f"unknown channels {sorted(unknown)}; allowed: {list(CHANNELS)}")
-        if not self.model.channels:
+        if not model.channels:
             raise ValueError("model.channels must name at least one channel")
-        if self.model.latent_dim < 1:
+        if set(model.conditions) - set(CONDITIONS) or "logr" not in model.conditions:
+            raise ValueError(f"model.conditions must include logr, subset of {list(CONDITIONS)}")
+        if model.latent_dim < 1:
             raise ValueError("model.latent_dim must be >= 1")
-        if not self.model.hidden or any(width < 1 for width in self.model.hidden):
-            raise ValueError("model.hidden must list at least one width >= 1")
-        if self.model.kernel_size < 1 or self.model.kernel_size % 2 == 0:
+        for name in ("conv_channels", "other_hidden", "hidden"):
+            widths = getattr(model, name)
+            if not widths or any(width < 1 for width in widths):
+                raise ValueError(f"model.{name} must list at least one width >= 1")
+        if model.narrow_features < 1:
+            raise ValueError("model.narrow_features must be >= 1")
+        if model.kernel_size < 1 or model.kernel_size % 2 == 0:
             raise ValueError("model.kernel_size must be odd and >= 1")
-        if not 0.0 <= self.model.dropout < 1.0:
+        if not 0.0 <= model.dropout < 1.0:
             raise ValueError("model.dropout must be in [0, 1)")
-        if self.loss.name not in _loss_names():
-            raise ValueError(f"unknown loss {self.loss.name!r}; allowed: {_loss_names()}")
-        if self.loss.beta < 0:
+        if loss.name not in _loss_names():
+            raise ValueError(f"unknown loss {loss.name!r}; allowed: {_loss_names()}")
+        if loss.beta < 0:
             raise ValueError("loss.beta must be >= 0")
-        if not 0.0 <= self.loss.beta_warmup_fraction <= 1.0:
+        if not 0.0 <= loss.beta_warmup_fraction <= 1.0:
             raise ValueError("loss.beta_warmup_fraction must be in [0, 1]")
-        if not 0.0 <= self.loss.floor_percentile <= 100.0:
-            raise ValueError("loss.floor_percentile must be in [0, 100]")
-        if self.loss.systematic_scale <= 0:
-            raise ValueError("loss.systematic_scale must be > 0")
-        if self.loss.student_t_dof <= 0:
+        if loss.eps <= 0:
+            raise ValueError("loss.eps must be > 0")
+        if loss.eps_per_band and (len(loss.eps_per_band) != 60 or min(loss.eps_per_band) <= 0):
+            raise ValueError("loss.eps_per_band must be empty or 60 positive values")
+        if loss.student_t_dof <= 0:
             raise ValueError("loss.student_t_dof must be > 0")
-        if self.train.epochs < 1 or self.train.debug_epochs < 1:
+        if train.epochs < 1 or train.debug_epochs < 1:
             raise ValueError("epoch counts must be >= 1")
-        if self.train.batch_size < 1 or self.train.debug_objects < 1:
+        if train.batch_size < 1 or train.debug_objects < 1:
             raise ValueError("batch_size and debug_objects must be >= 1")
-        if self.train.learning_rate <= 0:
+        if train.learning_rate <= 0:
             raise ValueError("train.learning_rate must be > 0")
         return self
 

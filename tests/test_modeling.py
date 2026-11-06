@@ -1,9 +1,9 @@
-"""Invariants of the model-ready tensors, the VAE and the loss registry.
+"""Invariants of the loader, the configuration, the VAE and the loss registry.
 
-These are the properties the training loop relies on: the shape vector is
-unit-norm over measured bands only, masked bands carry zero weight, the config
-rejects unknown keys, and every registered loss returns one finite value per
-object.
+These are the properties the training loop relies on: rotations never mix
+roles, the encoder input layout is fixed, masked bands carry zero weight, the
+config rejects unknown keys, and every registered loss returns one finite value
+per object.
 """
 
 from __future__ import annotations
@@ -15,10 +15,8 @@ import yaml
 
 from jpas_da.modeling import data as model_data
 from jpas_da.modeling.config import Config, load_config
-from jpas_da.modeling.losses import LOSSES, get_loss
-from jpas_da.modeling.vae import build_model, normalise_shape
-
-N_BANDS = 12
+from jpas_da.modeling.losses import LOSSES, chi2, get_loss, noise_variance
+from jpas_da.modeling.vae import build_model, kl_per_dim
 
 
 # --------------------------------------------------------------------------- #
@@ -155,99 +153,171 @@ def test_even_kernel_is_rejected():
 # --------------------------------------------------------------------------- #
 # model and losses
 # --------------------------------------------------------------------------- #
+N_BANDS, N_NARROW = 60, 54
+
+
 @pytest.fixture
 def batch():
     generator = torch.Generator().manual_seed(0)
     n = 5
-    g = torch.randn(n, N_BANDS, generator=generator)
     mask = torch.ones(n, N_BANDS)
     mask[0, 0] = 0.0
-    g = g * mask
-    g = g / g.norm(dim=-1, keepdim=True)
-    v = 0.1 * g.abs() + 0.01
-    v = v * mask
-    s_floor = torch.full((N_BANDS,), 0.02)
-    return g, v, mask, s_floor
+    g = torch.randn(n, N_BANDS, generator=generator) * mask
+    v = (0.1 * g.abs() + 0.05) * mask
+    sig_logr = torch.full((n,), 0.1)
+    return g, v, mask, sig_logr
 
 
 def _spec(**overrides):
     spec = {
-        "n_bands": N_BANDS,
+        "encoder": "conv",
         "n_channels": 3,
+        "n_cond": 1,
+        "n_bands": N_BANDS,
+        "n_narrow": N_NARROW,
         "latent_dim": 3,
-        "hidden": (16, 8),
+        "conv_channels": (4, 8),
         "kernel_size": 5,
-        "scale_head": True,
+        "narrow_features": 16,
+        "other_hidden": (8,),
+        "hidden": (16, 8),
         "dropout": 0.0,
     }
     spec.update(overrides)
     return spec
 
 
-def test_encoder_accepts_every_channel_subset():
-    for channels in (("g",), ("g", "v"), ("g", "v", "mask")):
-        model = build_model(_spec(n_channels=len(channels)))
-        out = model(torch.zeros(4, len(channels), N_BANDS))
-        assert out["mu_z"].shape == (4, 3)
-        assert out["mu_g"].shape == (4, N_BANDS)
+def _inputs(n=4, n_channels=3, n_cond=1):
+    return (
+        torch.randn(n, n_channels, N_NARROW),
+        torch.randn(n, n_channels * (N_BANDS - N_NARROW)),
+        torch.randn(n, n_cond),
+    )
+
+
+@pytest.mark.parametrize("encoder", ["conv", "mlp"])
+@pytest.mark.parametrize("channels", [1, 2, 3])
+def test_both_encoders_accept_every_channel_count(encoder, channels):
+    model = build_model(_spec(encoder=encoder, n_channels=channels))
+    out = model(*_inputs(n_channels=channels))
+    assert out["mu_z"].shape == (4, 3)
+    assert out["g_hat"].shape == (4, N_BANDS)
+
+
+def test_conv_encoder_sees_where_a_feature_sits_on_the_band_axis():
+    """No global pooling: moving a feature along the narrow axis changes the latent."""
+    torch.manual_seed(0)
+    model = build_model(_spec()).eval()
+    narrow, other, cond = _inputs(n=1)
+    narrow.zero_()
+    early, late = narrow.clone(), narrow.clone()
+    early[0, 0, 10] = 5.0
+    late[0, 0, 40] = 5.0
+    with torch.no_grad():
+        z_early = model(early, other, cond, sample=False)["mu_z"]
+        z_late = model(late, other, cond, sample=False)["mu_z"]
+    assert not torch.allclose(z_early, z_late, atol=1e-4)
+
+
+def test_evaluation_without_sampling_is_deterministic():
+    model = build_model(_spec())
+    inputs = _inputs()
+    first = model(*inputs, sample=False)
+    second = model(*inputs, sample=False)
+    torch.testing.assert_close(first["g_hat"], second["g_hat"])
+    torch.testing.assert_close(first["z"], first["mu_z"])
+
+
+def test_condition_reaches_the_decoder():
+    model = build_model(_spec()).eval()
+    z = torch.zeros(1, 3)
+    low = model.decode(z, torch.tensor([[2.0]]))
+    high = model.decode(z, torch.tensor([[8.0]]))
+    assert not torch.allclose(low, high)
+
+
+def test_condition_scale_is_stored_with_the_weights():
+    model = build_model(_spec())
+    model.set_condition_scale(torch.tensor([[1.0], [3.0], [5.0]]))
+    state = model.state_dict()
+    restored = build_model(_spec())
+    restored.load_state_dict(state)
+    torch.testing.assert_close(restored.cond_mean, torch.tensor([3.0]))
+    torch.testing.assert_close(restored.cond_scale, torch.tensor([2.0]))
 
 
 def test_checkpoint_spec_cannot_be_loaded_into_a_different_architecture():
-    """The spec alone decides the architecture, so a mismatched rebuild fails."""
-    trained = build_model(_spec(kernel_size=3, latent_dim=5, hidden=(12,)))
-    matching = build_model(_spec(kernel_size=3, latent_dim=5, hidden=(12,)))
-    matching.load_state_dict(trained.state_dict())
-
-    wrong_width = build_model(_spec(kernel_size=3, latent_dim=5, hidden=(13,)))
+    trained = build_model(_spec(latent_dim=5, hidden=(12,)))
+    build_model(_spec(latent_dim=5, hidden=(12,))).load_state_dict(trained.state_dict())
     with pytest.raises(RuntimeError):
-        wrong_width.load_state_dict(trained.state_dict())
-
-    wrong_latent = build_model(_spec(kernel_size=3, latent_dim=4, hidden=(12,)))
+        build_model(_spec(latent_dim=5, hidden=(13,))).load_state_dict(trained.state_dict())
     with pytest.raises(RuntimeError):
-        wrong_latent.load_state_dict(trained.state_dict())
+        build_model(_spec(latent_dim=4, hidden=(12,))).load_state_dict(trained.state_dict())
 
 
-def test_normalised_shape_lies_on_the_sphere_over_the_mask(batch):
-    g, _, mask, _ = batch
-    mu = normalise_shape(torch.randn_like(g), mask)
-    norms = (mu * mask).norm(dim=-1)
-    torch.testing.assert_close(norms, torch.ones_like(norms))
+def test_incomplete_spec_is_rejected():
+    spec = _spec()
+    del spec["encoder"]
+    with pytest.raises(ValueError, match="encoder"):
+        build_model(spec)
+
+
+def test_noise_variance_adds_the_floor_and_the_common_mode(batch):
+    g, v, mask, sig_logr = batch
+    plain = noise_variance(g, v, mask, sig_logr, eps=0.1, common_mode=False)
+    torch.testing.assert_close(plain, (v**2 + 0.01) * mask)
+    shared = noise_variance(g, v, mask, sig_logr, eps=0.1, common_mode=True)
+    torch.testing.assert_close(shared - plain, (g * 0.1) ** 2 * mask)
+    assert shared[0, 0] == 0.0, "masked band must have zero variance"
+
+
+def test_per_band_floor_broadcasts(batch):
+    g, v, mask, sig_logr = batch
+    eps = torch.linspace(0.01, 0.2, N_BANDS)
+    w2 = noise_variance(g, v, mask, sig_logr, eps=eps, common_mode=False)
+    torch.testing.assert_close(w2, (v**2 + eps**2) * mask)
 
 
 @pytest.mark.parametrize("name", sorted(LOSSES))
 def test_every_loss_is_finite_and_per_object(name, batch):
-    g, v, mask, s_floor = batch
-    mu = normalise_shape(torch.randn_like(g), mask)
-    values = get_loss(name)(g, v, mask, mu, s_floor)
+    g, v, mask, sig_logr = batch
+    w2 = noise_variance(g, v, mask, sig_logr, eps=0.1)
+    values = get_loss(name)(g, torch.randn_like(g), w2, mask)
     assert values.shape == (len(g),)
     assert torch.isfinite(values).all()
 
 
 def test_gaussian_nll_penalises_a_wrong_shape_more_than_a_right_one(batch):
-    g, v, mask, s_floor = batch
+    g, v, mask, sig_logr = batch
+    w2 = noise_variance(g, v, mask, sig_logr, eps=0.1)
     loss_fn = get_loss("gaussian_nll")
-    perfect = loss_fn(g, v, mask, g, s_floor).mean()
-    wrong = loss_fn(g, v, mask, -g, s_floor).mean()
-    assert wrong > perfect
+    assert loss_fn(g, -g, w2, mask).mean() > loss_fn(g, g, w2, mask).mean()
 
 
-def test_masked_band_contributes_nothing_to_the_loss(batch):
-    g, v, mask, s_floor = batch
-    loss_fn = get_loss("gaussian_nll")
-    mu = normalise_shape(torch.randn_like(g), mask)
-    baseline = loss_fn(g, v, mask, mu, s_floor)
-    perturbed = mu.clone()
-    perturbed[0, 0] = 123.0
-    perturbed = perturbed * mask
-    changed = loss_fn(g, v, mask, perturbed, s_floor)
-    torch.testing.assert_close(baseline[0], changed[0])
+@pytest.mark.parametrize("name", sorted(LOSSES))
+def test_masked_band_contributes_nothing_to_the_loss(name, batch):
+    g, v, mask, sig_logr = batch
+    w2 = noise_variance(g, v, mask, sig_logr, eps=0.1)
+    mu = torch.randn_like(g)
+    moved = mu.clone()
+    moved[0, 0] = 123.0
+    loss_fn = get_loss(name)
+    torch.testing.assert_close(loss_fn(g, mu, w2, mask)[0], loss_fn(g, moved, w2, mask)[0])
 
 
-def test_noise_floor_is_per_band_and_positive(batch):
-    from jpas_da.modeling.train import noise_floor
+def test_gaussian_nll_gradient_matches_the_inverse_variance_weighting(batch):
+    """With fixed w2 the log term is constant: only the chi2 drives the gradient."""
+    g, v, mask, sig_logr = batch
+    w2 = noise_variance(g, v, mask, sig_logr, eps=0.1)
+    mu = torch.randn_like(g, requires_grad=True)
+    get_loss("gaussian_nll")(g, mu, w2, mask).sum().backward()
+    grad_nll = mu.grad.clone()
+    mu.grad = None
+    (0.5 * chi2(g, mu, w2, mask)).sum().backward()
+    torch.testing.assert_close(grad_nll, mu.grad)
 
-    _, v, mask, _ = batch
-    floor = noise_floor(v, mask, percentile=50.0)
-    assert floor.shape == (N_BANDS,)
-    assert torch.isfinite(floor).all()
-    assert (floor > 0).all()
+
+def test_kl_is_zero_at_the_prior_and_positive_elsewhere():
+    zeros = torch.zeros(2, 3)
+    torch.testing.assert_close(kl_per_dim(zeros, zeros), zeros)
+    assert (kl_per_dim(torch.ones(2, 3), zeros) > 0).all()
