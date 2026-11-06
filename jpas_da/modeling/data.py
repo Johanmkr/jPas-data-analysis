@@ -1,166 +1,85 @@
-"""Model-ready tensors for the VAE: RMS shape/scale decomposition.
+"""Load the model-ready arrays and cut them into the roles of one rotation.
 
-The interim table stores flux ``f``, absolute error ``sigma`` and a validity
-mask per band. This module turns one object's row into
+The arrays are written by :mod:`jpas_da.features` (``make features``); the roles
+come from :func:`jpas_da.splits.assign_roles`. Training, prediction and the
+baselines all go through :func:`load`, :func:`split_indices` and
+:func:`model_inputs`, so they cannot disagree about which rows are held out or
+how the encoder input is laid out.
 
-* ``g = f / r`` with ``r = sqrt(sum_j f_j^2 mask_j)`` -- the SED shape,
-  unit-norm over the measured bands;
-* ``v = sqrt(sigma^2 + (floor_frac * f)^2) / r`` -- the propagated shape
-  error, carrying the multiplicative relative-calibration term. Masked bands
-  get ``v = 0`` so the loss can give them exactly zero weight;
-* ``logr`` and ``sig_logr`` -- brightness and its statistical uncertainty.
+Encoder input layout, shared by every encoder:
 
-Dividing flux and error by the same per-object scalar leaves every Gaussian
-likelihood term invariant, so this is a conditioning choice, not a model of the
-data. It is computed from each object alone: no sample statistic enters, so it
-cannot leak across the leave-one-tile-out folds.
-
-The additive per-band floor ``s_j`` is **not** stored here. It has to be fitted
-on the training fold only, so :mod:`jpas_da.modeling.train` derives it from the
-rows it trains on.
-
-Run with ``python -m jpas_da.modeling.data`` (``make model-data``).
+* ``narrow``: ``(N, C, 54)`` -- the configured channels over the 54 narrow bands,
+  which sit on the evenly spaced 100 A grid;
+* ``other``: ``(N, C * 6)`` -- the same channels for uJAVA, uJPAS, gSDSS, rSDSS,
+  iSDSS and J1007, flattened band-major;
+* ``cond``: ``(N, K)`` -- the conditioning variables (``logr`` and optionally
+  ``sig_logr``), given to encoder *and* decoder.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from loguru import logger
 import numpy as np
-import pandas as pd
-import typer
 
-from jpas_da.bands import BAND_NAMES, N_BANDS
-from jpas_da.config import INTERIM_DATA_DIR, PROCESSED_DATA_DIR
+from jpas_da.bands import BAND_INDEX, select
+from jpas_da.features import MODEL_DATA_FILE
+from jpas_da.splits import ROLES, assign_roles
 
-app = typer.Typer()
+NARROW_INDEX = np.array([BAND_INDEX[b] for b in select("narrow")])
+OTHER_INDEX = np.array(
+    [BAND_INDEX[b] for block in ("medium", "broad", "highpass") for b in select(block)]
+)
 
-OBJECTS_FILE = INTERIM_DATA_DIR / "objects.parquet"
-FOLDS_FILE = INTERIM_DATA_DIR / "folds.parquet"
-MODEL_DATA_FILE = PROCESSED_DATA_DIR / "vae_inputs.npz"
+CHANNELS = ("g", "v", "mask")
+"""Per-band encoder channels."""
 
-# Relative photometric-calibration scatter of miniJPAS, 0.028 mag as reported
-# for the narrow-band comparison. In fractional flux this is ~0.026. It is a
-# survey constant, not a fitted quantity.
-RELATIVE_CALIB_FLOOR = 0.026
+CONDITIONS = ("logr", "sig_logr")
+"""Per-object conditioning variables."""
 
-
-def normalise(
-    flux: np.ndarray,
-    sigma: np.ndarray,
-    mask: np.ndarray,
-    floor_frac: float = RELATIVE_CALIB_FLOOR,
-) -> dict[str, np.ndarray]:
-    """Per-object RMS normalisation of flux, error and mask.
-
-    ``flux`` and ``sigma`` are ``(n_objects, n_bands)`` in canonical band order,
-    ``mask`` is 0 where the archive quoted no error. A masked band still has a
-    flux but no usable uncertainty, so it is excluded from the norm and given
-    zero shape error.
-
-    Returns ``g``, ``v``, ``mask`` (float32, mask as int8), ``logr`` and
-    ``sig_logr`` (float32, shape ``(n_objects,)``).
-    """
-    flux = np.asarray(flux, dtype=np.float64)
-    sigma = np.asarray(sigma, dtype=np.float64)
-    mask = np.asarray(mask, dtype=np.float64)
-    if flux.shape != sigma.shape or flux.shape != mask.shape:
-        raise ValueError(f"shape mismatch: flux {flux.shape}, sigma {sigma.shape}")
-    if not np.isfinite(flux).all():
-        raise ValueError("non-finite flux in the interim table")
-
-    r = np.sqrt((flux**2 * mask).sum(axis=1))
-    if np.any(r <= 0):
-        raise ValueError(f"{int((r <= 0).sum())} objects have zero masked norm")
-
-    # The archive quotes a signed relative error, so the absolute error is
-    # flux * relerr; here sigma is already absolute and non-negative.
-    sigma = np.sqrt(sigma**2 + (floor_frac * flux) ** 2)
-
-    g = flux / r[:, None]
-    v = sigma / r[:, None]
-    v = np.where(mask > 0, v, 0.0)
-    g = np.where(mask > 0, g, 0.0)
-
-    logr = np.log(r)
-    sig_logr = np.sqrt((mask * g**2 * v**2).sum(axis=1))
-
-    if not np.isfinite(g).all() or not np.isfinite(v).all():
-        raise ValueError("non-finite values after normalisation")
-    if not np.isfinite(logr).all() or not np.isfinite(sig_logr).all():
-        raise ValueError("non-finite brightness or brightness error")
-
-    return {
-        "g": g.astype(np.float32),
-        "v": v.astype(np.float32),
-        "mask": mask.astype(np.int8),
-        "logr": logr.astype(np.float32),
-        "sig_logr": sig_logr.astype(np.float32),
-    }
-
-
-def build(
-    objects_path: Path = OBJECTS_FILE,
-    folds_path: Path = FOLDS_FILE,
-    output_path: Path = MODEL_DATA_FILE,
-) -> dict[str, np.ndarray]:
-    """Write the model-ready arrays, aligned with the fold assignment."""
-    objects = pd.read_parquet(objects_path)
-    if objects[["object_id", "tile_id"]].duplicated().any():
-        raise ValueError("duplicated object_id/tile_id in the interim table")
-
-    flux = objects[[f"flux_{b}" for b in BAND_NAMES]].to_numpy(dtype=np.float64)
-    sigma = objects[[f"sigma_{b}" for b in BAND_NAMES]].to_numpy(dtype=np.float64)
-    mask = objects[[f"mask_{b}" for b in BAND_NAMES]].to_numpy(dtype=np.int8)
-    arrays = normalise(flux, sigma, mask)
-
-    if folds_path.exists():
-        folds = pd.read_parquet(folds_path)
-        aligned = objects[["object_id"]].merge(folds, on="object_id", how="left")
-        if aligned["fold"].isna().any():
-            raise ValueError("fold assignment does not cover every object")
-        arrays["fold"] = aligned["fold"].to_numpy(dtype=np.int64)
-        logger.info(f"aligned fold assignment for {len(aligned):,} objects")
-    else:
-        logger.warning(f"{folds_path} not found; writing arrays without folds")
-
-    arrays["object_id"] = objects["object_id"].to_numpy(dtype=str)
-    arrays["tile_id"] = objects["tile_id"].to_numpy(dtype=np.int64)
-    arrays["n_bands"] = np.array(N_BANDS, dtype=np.int64)
-    arrays["relative_calib_floor"] = np.array(RELATIVE_CALIB_FLOOR, dtype=np.float64)
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(output_path, **arrays)
-    logger.success(
-        f"Wrote {output_path}: {len(arrays['g']):,} objects, {N_BANDS} bands, "
-        f"median |g| {np.abs(arrays['g']).mean():.3f}, "
-        f"masked {100 * (1 - arrays['mask'].mean()):.2f}%"
-    )
-    return arrays
+REQUIRED = {"g", "v", "mask", "logr", "sig_logr", "object_id", "tile_id", "holdout", "quality"}
 
 
 def load(path: Path = MODEL_DATA_FILE) -> dict[str, np.ndarray]:
-    """Load the model-ready arrays written by :func:`build`."""
-    if not Path(path).exists():
-        raise FileNotFoundError(f"{path} not found; run `make model-data` first")
+    """Load the arrays written by :func:`jpas_da.features.build`."""
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"{path} not found; run `make data` first")
     with np.load(path, allow_pickle=False) as handle:
         arrays = {key: handle[key] for key in handle.files}
-    required = {"g", "v", "mask", "logr", "sig_logr", "fold", "object_id"}
-    missing = required - arrays.keys()
+    missing = REQUIRED - arrays.keys()
     if missing:
-        raise ValueError(f"{path} is missing keys: {sorted(missing)}")
+        raise ValueError(f"{path} is missing keys {sorted(missing)}; rerun `make data`")
     return arrays
 
 
-@app.command()
-def main(
-    objects_path: Path = OBJECTS_FILE,
-    folds_path: Path = FOLDS_FILE,
-    output_path: Path = MODEL_DATA_FILE,
-):
-    build(objects_path, folds_path, output_path)
+def roles(arrays: dict[str, np.ndarray], rotation: int) -> np.ndarray:
+    """Role of every object in ``rotation`` (see :mod:`jpas_da.splits`)."""
+    return assign_roles(arrays["tile_id"], arrays["holdout"], arrays["quality"], rotation)
 
 
-if __name__ == "__main__":
-    app()
+def split_indices(arrays: dict[str, np.ndarray], rotation: int) -> dict[str, np.ndarray]:
+    """Row indices of ``train``, ``val``, ``test`` and ``holdout`` for one rotation."""
+    assigned = roles(arrays, rotation)
+    return {role: np.flatnonzero(assigned == role) for role in (*ROLES, "holdout")}
+
+
+def model_inputs(
+    arrays: dict[str, np.ndarray],
+    channels: tuple[str, ...] = CHANNELS,
+    conditions: tuple[str, ...] = ("logr",),
+) -> dict[str, np.ndarray]:
+    """Build the encoder input blocks, float32, for every object."""
+    unknown = set(channels) - set(CHANNELS)
+    if unknown or not channels:
+        raise ValueError(f"channels must be a non-empty subset of {CHANNELS}, got {channels}")
+    unknown = set(conditions) - set(CONDITIONS)
+    if unknown or "logr" not in conditions:
+        raise ValueError(f"conditions must include 'logr' and be a subset of {CONDITIONS}")
+    stacked = np.stack([arrays[name].astype(np.float32) for name in channels], axis=1)
+    other = stacked[:, :, OTHER_INDEX].transpose(0, 2, 1).reshape(len(stacked), -1)
+    return {
+        "narrow": np.ascontiguousarray(stacked[:, :, NARROW_INDEX]),
+        "other": np.ascontiguousarray(other),
+        "cond": np.stack([arrays[name].astype(np.float32) for name in conditions], axis=1),
+    }

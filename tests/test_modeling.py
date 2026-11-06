@@ -22,73 +22,77 @@ N_BANDS = 12
 
 
 # --------------------------------------------------------------------------- #
-# normalisation
+# loader
 # --------------------------------------------------------------------------- #
-def _synthetic(n_rows: int = 8, n_bands: int = N_BANDS, masked=None):
+def _arrays(n_per_tile: int = 10) -> dict[str, np.ndarray]:
     rng = np.random.default_rng(0)
-    flux = rng.normal(scale=10.0, size=(n_rows, n_bands))
-    sigma = np.abs(flux) * 0.2 + 0.01
-    mask = np.ones((n_rows, n_bands), dtype=np.int8)
-    if masked is not None:
-        for row, band in masked:
-            mask[row, band] = 0
-            sigma[row, band] = np.nan
-    return flux, sigma, mask
+    tiles = np.repeat([2241, 2243, 2406, 2470], n_per_tile)
+    n = len(tiles)
+    holdout = np.zeros(n, dtype=bool)
+    holdout[::7] = True
+    quality = np.array(["clean"] * n)
+    quality[3::11] = "severe"
+    return {
+        "g": rng.normal(size=(n, 60)).astype(np.float32),
+        "v": rng.uniform(0.01, 0.1, size=(n, 60)).astype(np.float32),
+        "mask": np.ones((n, 60), dtype=np.int8),
+        "logr": rng.normal(5.0, 1.0, n).astype(np.float32),
+        "sig_logr": rng.uniform(0.05, 0.3, n).astype(np.float32),
+        "object_id": np.array([f"{t}-{i}" for i, t in enumerate(tiles)]),
+        "tile_id": tiles,
+        "holdout": holdout,
+        "quality": quality,
+    }
 
 
-def test_shape_is_unit_norm_over_measured_bands():
-    flux, sigma, mask = _synthetic(masked=[(0, 3), (1, 2)])
-    out = model_data.normalise(flux, sigma, mask)
-    norms = np.sqrt((out["g"].astype(np.float64) ** 2 * out["mask"]).sum(axis=1))
-    np.testing.assert_allclose(norms, 1.0, rtol=1e-5)
+@pytest.mark.parametrize("rotation", range(4))
+def test_split_indices_are_disjoint_and_skip_holdout_and_severe(rotation):
+    arrays = _arrays()
+    parts = model_data.split_indices(arrays, rotation)
+    seen = np.concatenate([parts[r] for r in ("train", "val", "test")])
+    assert len(seen) == len(set(seen.tolist())), "a row has two roles"
+    assert not arrays["holdout"][seen].any()
+    assert not (arrays["quality"][seen] == "severe").any()
+    np.testing.assert_array_equal(parts["holdout"], np.flatnonzero(arrays["holdout"]))
+    train_tiles = set(arrays["tile_id"][parts["train"]].tolist())
+    assert train_tiles.isdisjoint(arrays["tile_id"][parts["test"]].tolist())
+    assert train_tiles.isdisjoint(arrays["tile_id"][parts["val"]].tolist())
 
 
-def test_masked_band_has_zero_shape_and_zero_error():
-    flux, sigma, mask = _synthetic(masked=[(0, 3)])
-    out = model_data.normalise(flux, sigma, mask)
-    assert out["mask"][0, 3] == 0
-    assert out["g"][0, 3] == 0.0
-    assert out["v"][0, 3] == 0.0
+def test_model_inputs_split_the_band_axis_into_narrow_and_other():
+    arrays = _arrays()
+    inputs = model_data.model_inputs(arrays, ("g", "mask"), ("logr", "sig_logr"))
+    n = len(arrays["g"])
+    assert inputs["narrow"].shape == (n, 2, 54)
+    assert inputs["other"].shape == (n, 2 * 6)
+    assert inputs["cond"].shape == (n, 2)
+    np.testing.assert_array_equal(inputs["narrow"][:, 0], arrays["g"][:, :54])
+    # band-major: (g, mask) of uJAVA first, then of uJPAS, ...
+    uJAVA = model_data.OTHER_INDEX[0]
+    assert inputs["other"][0, 0] == arrays["g"][0, uJAVA]
+    assert inputs["other"][0, 1] == arrays["mask"][0, uJAVA]
 
 
-def test_masked_band_flux_does_not_move_the_norm():
-    """A band with no quoted error is excluded from the norm, not merely zeroed."""
-    flux, sigma, mask = _synthetic(masked=[(0, 5)])
-    baseline = model_data.normalise(flux, sigma, mask)
-    loud = flux.copy()
-    loud[0, 5] = 1e6
-    perturbed = model_data.normalise(loud, sigma, mask)
-    np.testing.assert_allclose(perturbed["logr"][0], baseline["logr"][0], rtol=1e-6)
-    np.testing.assert_allclose(
-        perturbed["g"][0] * perturbed["mask"][0],
-        baseline["g"][0] * baseline["mask"][0],
-        rtol=1e-6,
-    )
+def test_other_bands_are_the_six_off_grid_filters():
+    from jpas_da.bands import BAND_NAMES
+
+    names = [BAND_NAMES[i] for i in model_data.OTHER_INDEX]
+    assert names == ["uJAVA", "uJPAS", "gSDSS", "rSDSS", "iSDSS", "J1007"]
+    assert len(model_data.NARROW_INDEX) == 54
 
 
-def test_sigma_scales_with_the_multiplicative_floor():
-    flux = np.full((2, N_BANDS), 1.0)
-    sigma = np.zeros_like(flux)
-    mask = np.ones_like(flux, dtype=np.int8)
-    quiet = model_data.normalise(flux, sigma, mask, floor_frac=0.0)
-    floored = model_data.normalise(flux, sigma, mask, floor_frac=0.026)
-    assert quiet["v"].max() == 0.0
-    assert floored["v"].min() > 0.0
+def test_conditions_must_include_brightness():
+    with pytest.raises(ValueError, match="logr"):
+        model_data.model_inputs(_arrays(), conditions=("sig_logr",))
 
 
-def test_zero_norm_object_is_rejected():
-    flux = np.zeros((1, N_BANDS))
-    sigma = np.ones((1, N_BANDS))
-    mask = np.ones((1, N_BANDS), dtype=np.int8)
-    with pytest.raises(ValueError, match="zero masked norm"):
-        model_data.normalise(flux, sigma, mask)
-
-
-def test_brightness_error_follows_the_propagated_variance():
-    flux, sigma, mask = _synthetic()
-    out = model_data.normalise(flux, sigma, mask)
-    expected = np.sqrt((out["g"] ** 2 * out["v"] ** 2 * out["mask"]).sum(axis=1))
-    np.testing.assert_allclose(out["sig_logr"], expected, rtol=1e-5)
+def test_load_reports_missing_keys(tmp_path):
+    path = tmp_path / "inputs.npz"
+    arrays = _arrays()
+    del arrays["quality"]
+    np.savez(path, **arrays)
+    with pytest.raises(ValueError, match="quality"):
+        model_data.load(path)
 
 
 # --------------------------------------------------------------------------- #
