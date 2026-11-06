@@ -80,7 +80,13 @@ def _execute(run: str, overrides: list[str], threads: int) -> tuple[str, int]:
         "--set",
         f"output.metrics_path={out}",
     ]
-    env = {**os.environ, "OMP_NUM_THREADS": str(threads), "MKL_NUM_THREADS": str(threads)}
+    env = {
+        **os.environ,
+        "OMP_NUM_THREADS": str(threads),
+        "MKL_NUM_THREADS": str(threads),
+        # W&B (only active with WANDB_API_KEY set): one group per variant, run = directory.
+        "WANDB_GROUP": os.environ.get("WANDB_GROUP", f"sweep-{run.split('-')[0]}"),
+    }
     log = out.with_name("train.log")
     with log.open("w") as handle:
         code = subprocess.call(command, cwd=PROJ_ROOT, env=env, stdout=handle, stderr=handle)

@@ -152,6 +152,21 @@ architecture, channels, conditions and `eps`), `models/vae_last.pt`, and
 evaluation reports on the validation and test tiles: chi2/dof by S/N, tile and
 quality, active latent dimensions).
 
+### Weights & Biases
+
+Training logs to W&B when `WANDB_API_KEY` is set (and `WANDB_MODE` is not
+`disabled`/`offline`); without a key nothing is sent and the JSON metrics are
+still written. Each epoch logs the losses, beta, the learning rate and the KL
+per latent dimension; the run summary holds the best epoch and the test and
+validation chi2/dof (overall, by S/N and by quality) and active dimensions.
+
+| Variable | Default |
+|---|---|
+| `WANDB_PROJECT` (or `--wandb-project`) | `jpas-da` |
+| `WANDB_ENTITY` (or `--wandb-entity`) | `johan-m-kroken-uit-norges-arktiske-universitet` |
+| `WANDB_RUN_NAME` | the sweep run directory, else `<encoder>-d<size>-r<rotation>` |
+| `WANDB_GROUP` | none; `make sweep` sets `sweep-<variant>` |
+
 ### Docker / cluster
 
 The image is CPU by default; on a GPU node install torch from the matching CUDA

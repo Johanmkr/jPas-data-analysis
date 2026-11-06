@@ -369,8 +369,10 @@ def test_latent_report_counts_active_dimensions():
 # --------------------------------------------------------------------------- #
 # training and prediction, end to end on synthetic arrays
 # --------------------------------------------------------------------------- #
-def test_train_and_predict_run_end_to_end(tmp_path):
+def test_train_and_predict_run_end_to_end(tmp_path, monkeypatch):
     import json
+
+    monkeypatch.setenv("WANDB_MODE", "disabled")  # never log from the test suite
 
     from jpas_da.modeling import predict, train
 
@@ -498,3 +500,94 @@ def test_report_groups_runs_by_model_and_size(tmp_path):
     assert list(groups) == [("vae-conv", 8)]
     text = render(groups)
     assert "| vae-conv | 8 | 2 | 1.100 ±0.100 |" in text
+
+
+# --------------------------------------------------------------------------- #
+# Weights & Biases
+# --------------------------------------------------------------------------- #
+def test_wandb_needs_a_key_and_an_online_mode(monkeypatch):
+    from jpas_da.modeling.train import wandb_enabled
+
+    monkeypatch.delenv("WANDB_API_KEY", raising=False)
+    monkeypatch.delenv("WANDB_MODE", raising=False)
+    assert not wandb_enabled()
+    monkeypatch.setenv("WANDB_API_KEY", "not-a-real-key")
+    assert wandb_enabled()
+    for mode in ("disabled", "offline", "dryrun"):
+        monkeypatch.setenv("WANDB_MODE", mode)
+        assert not wandb_enabled()
+
+
+def test_run_name_prefers_env_then_sweep_directory(monkeypatch, tmp_path):
+    from jpas_da.modeling.train import run_name
+
+    config = Config()
+    monkeypatch.delenv("WANDB_RUN_NAME", raising=False)
+    assert run_name(config, debug=False) == "conv-d8-r0"
+    assert run_name(config, debug=True) == "conv-d8-r0-debug"
+    config.output.metrics_path = tmp_path / "runs" / "gmask-d8-r2" / "metrics.json"
+    assert run_name(config, debug=False) == "gmask-d8-r2"
+    monkeypatch.setenv("WANDB_RUN_NAME", "chosen")
+    assert run_name(config, debug=False) == "chosen"
+
+
+def test_epoch_log_flattens_kl_per_dimension():
+    from jpas_da.modeling.train import epoch_log
+
+    record = {"epoch": 3, "beta": 1.0, "val_loss": 9.0, "val_kl_per_dim": [0.5, 0.0, 0.2]}
+    values = epoch_log(record, lr=1e-3)
+    assert values["val_kl_dim/0"] == 0.5 and values["val_kl_dim/2"] == 0.2
+    assert values["val_active_dims"] == 2
+    assert values["lr"] == 1e-3 and "val_kl_per_dim" not in values
+
+
+class _FakeRun:
+    def __init__(self):
+        self.logged, self.summary, self.exit_code = [], {}, None
+
+    def log(self, values, step):
+        self.logged.append((step, values))
+
+    def finish(self, exit_code=0):
+        self.exit_code = exit_code
+
+
+def test_training_logs_every_epoch_and_a_summary(tmp_path, monkeypatch):
+    from jpas_da.modeling import train
+
+    fake = _FakeRun()
+    monkeypatch.setattr(train, "start_wandb", lambda *a: (train.Tracker(fake), True))
+    arrays = _arrays(n_per_tile=30)
+    np.savez(tmp_path / "inputs.npz", **arrays)
+    overrides = [
+        f"data.path={tmp_path / 'inputs.npz'}",
+        "model.latent_dim=2",
+        "model.conv_channels=[4]",
+        "model.narrow_features=8",
+        "model.other_hidden=[8]",
+        "model.hidden=[16]",
+        "train.epochs=2",
+        "train.batch_size=32",
+        f"output.model_path={tmp_path / 'vae.pt'}",
+        f"output.metrics_path={tmp_path / 'metrics.json'}",
+    ]
+    train.main(config_path=None, overrides=overrides, debug=False, seed=0)
+    assert [step for step, _ in fake.logged] == [1, 2]
+    assert "val_kl_dim/1" in fake.logged[-1][1]
+    assert "test/chi2_dof_pooled" in fake.summary and "best_epoch" in fake.summary
+    assert fake.exit_code == 0
+
+
+def test_failed_training_marks_the_run_failed(monkeypatch):
+    from jpas_da.modeling import train
+
+    fake = _FakeRun()
+    monkeypatch.setattr(train, "start_wandb", lambda *a: (train.Tracker(fake), True))
+    with pytest.raises(FileNotFoundError):
+        train.main(
+            config_path=None,
+            overrides=["data.path=/nonexistent/inputs.npz"],
+            debug=False,
+            seed=0,
+        )
+    assert fake.exit_code == 1

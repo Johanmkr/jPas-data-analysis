@@ -18,17 +18,31 @@ Artefacts:
 All modelling choices come from ``configs/vae.yaml``; ``--set key=value``
 overrides any of them, and ``--debug`` trains on a small subset for a couple of
 epochs so the pipeline can be smoke-tested.
+
+Weights & Biases logging is optional and follows the old repo's pattern: it is
+on only when ``wandb`` is importable, ``WANDB_API_KEY`` is set and
+``WANDB_MODE`` is not ``disabled``/``offline``/``dryrun``, so local runs and
+tests without a key never log. ``WANDB_PROJECT``, ``WANDB_ENTITY``,
+``WANDB_RUN_NAME`` and ``WANDB_GROUP`` choose where a run goes (``--wandb-project``
+and ``--wandb-entity`` override the first two). Each epoch logs the training and
+validation losses, beta, the learning rate and the validation KL per latent
+dimension; the end of the run writes the best epoch and the test/validation
+reports to the run summary. The JSON metrics and checkpoints are written either
+way: W&B is for monitoring, not the record.
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 import json
 import math
+import os
 from pathlib import Path
 import random
 import time
-from typing import Annotated
+from typing import Annotated, Any
 
 from loguru import logger
 import numpy as np
@@ -48,6 +62,122 @@ app = typer.Typer()
 DEFAULT_CONFIG = PROJ_ROOT / "configs" / "vae.yaml"
 DEBUG_EVAL_OBJECTS = 2048
 """Validation/test objects scored per epoch in ``--debug`` runs."""
+
+WANDB_PROJECT = "jpas-da"
+WANDB_ENTITY = "johan-m-kroken-uit-norges-arktiske-universitet"
+
+
+# --------------------------------------------------------------------------- #
+# Weights & Biases
+# --------------------------------------------------------------------------- #
+def wandb_enabled() -> bool:
+    """Log only with ``wandb`` installed, an API key, and an online mode."""
+    try:
+        import wandb  # noqa: F401
+    except ImportError:
+        return False
+    if os.environ.get("WANDB_MODE", "").lower() in ("disabled", "dryrun", "offline"):
+        return False
+    return bool(os.environ.get("WANDB_API_KEY"))
+
+
+def run_name(config: Config, debug: bool) -> str:
+    """``WANDB_RUN_NAME``, else the run directory a sweep gives, else a description."""
+    if os.environ.get("WANDB_RUN_NAME"):
+        return os.environ["WANDB_RUN_NAME"]
+    parent = config.output.metrics_path.parent
+    if parent.name not in ("reports", ""):
+        return parent.name
+    name = f"{config.model.encoder}-d{config.model.latent_dim}-r{config.data.rotation}"
+    return f"{name}-debug" if debug else name
+
+
+class Tracker:
+    """Thin wrapper so the training loop never checks whether W&B is on."""
+
+    def __init__(self, run: Any = None) -> None:
+        self.run = run
+
+    def log(self, values: dict[str, float], step: int) -> None:
+        if self.run is not None:
+            self.run.log(values, step=step)
+
+    def summary(self, values: dict[str, object]) -> None:
+        if self.run is not None:
+            self.run.summary.update(values)
+
+
+def start_wandb(config: Config, debug: bool, overrides: list[str]) -> tuple[Tracker, bool]:
+    """``(tracker, started_here)``; a no-op tracker when logging is off.
+
+    If a run is already active (e.g. a ``wandb agent`` started it), log into it
+    and leave finishing it to its owner.
+    """
+    if not wandb_enabled():
+        return Tracker(), False
+    import wandb
+
+    resolved = {**config.to_dict(), "overrides": overrides, "debug": debug}
+    if wandb.run is not None:
+        wandb.config.update(resolved, allow_val_change=True)
+        return Tracker(wandb.run), False
+    run = wandb.init(
+        project=os.environ.get("WANDB_PROJECT", WANDB_PROJECT),
+        entity=os.environ.get("WANDB_ENTITY", WANDB_ENTITY),
+        name=run_name(config, debug),
+        group=os.environ.get("WANDB_GROUP"),
+        job_type="debug" if debug else "train",
+        tags=[
+            config.model.encoder,
+            f"d{config.model.latent_dim}",
+            f"rotation-{config.data.rotation}",
+        ],
+        config=resolved,
+    )
+    logger.info(f"W&B run {run.name}: {run.url}")
+    return Tracker(run), True
+
+
+@contextmanager
+def tracking(config: Config, debug: bool, overrides: list[str]) -> Iterator[Tracker]:
+    """Start W&B if enabled; finish the run, marked failed if training raised."""
+    tracker, started = start_wandb(config, debug, overrides)
+    try:
+        yield tracker
+    except BaseException:
+        if started:
+            tracker.run.finish(exit_code=1)
+        raise
+    if started:
+        tracker.run.finish()
+
+
+def epoch_log(record: dict[str, object], lr: float) -> dict[str, float]:
+    """Flatten one history record for W&B: scalars plus ``val_kl_dim/<i>``."""
+    values = {k: v for k, v in record.items() if isinstance(v, (int, float))}
+    values["lr"] = lr
+    kl_dims = record.get("val_kl_per_dim", [])
+    for i, kl in enumerate(kl_dims):
+        values[f"val_kl_dim/{i}"] = kl
+    values["val_active_dims"] = sum(kl > evaluate.ACTIVE_KL for kl in kl_dims)
+    return values
+
+
+def summary_values(metrics: dict[str, Any]) -> dict[str, object]:
+    """The numbers to compare runs by, flattened for the W&B run summary."""
+    values: dict[str, object] = {"best_epoch": metrics["best_epoch"]}
+    for role in ("val", "test"):
+        rec = metrics[role]["reconstruction"]
+        values[f"{role}/nll"] = metrics[role]["nll"]
+        values[f"{role}/chi2_dof_pooled"] = rec["overall"]["chi2_dof_pooled"]
+        values[f"{role}/chi2_dof_median"] = rec["overall"]["chi2_dof_median"]
+        values[f"{role}/active_dims"] = metrics[role]["latent"]["active_dims"]
+        values[f"{role}/kl_total"] = metrics[role]["latent"]["kl_total"]
+        for group in ("by_snr", "by_quality"):
+            for key, summary in rec[group].items():
+                if "chi2_dof_pooled" in summary:
+                    values[f"{role}/{group}/{key}"] = summary["chi2_dof_pooled"]
+    return values
 
 
 def resolve_device(requested: str) -> torch.device:
@@ -225,6 +355,12 @@ def main(
     ] = None,
     debug: Annotated[bool, typer.Option("--debug", help="Small subset, few epochs")] = False,
     seed: Annotated[int | None, typer.Option("--seed", help="Override train.seed")] = None,
+    wandb_project: Annotated[
+        str | None, typer.Option("--wandb-project", help="Overrides WANDB_PROJECT")
+    ] = None,
+    wandb_entity: Annotated[
+        str | None, typer.Option("--wandb-entity", help="Overrides WANDB_ENTITY")
+    ] = None,
 ) -> dict[str, object]:
     """Train the VAE on one rotation. ``--set dotted.key=value`` overrides the YAML."""
     config = load_config(config_path, list(overrides or []))
@@ -232,6 +368,22 @@ def main(
         config.train.seed = seed
     if debug:
         config.train.epochs = config.train.debug_epochs
+    if wandb_project:
+        os.environ["WANDB_PROJECT"] = wandb_project
+    if wandb_entity:
+        os.environ["WANDB_ENTITY"] = wandb_entity
+    with tracking(config, debug, list(overrides or [])) as tracker:
+        return fit(config, config_path, list(overrides or []), debug, tracker)
+
+
+def fit(
+    config: Config,
+    config_path: Path | None,
+    overrides: list[str],
+    debug: bool,
+    tracker: Tracker,
+) -> dict[str, object]:
+    """The training run itself; ``main`` only resolves the config and tracking."""
     set_seed(config.train.seed)
     device = resolve_device(config.train.device)
 
@@ -312,6 +464,7 @@ def main(
             **{f"val_{k}": v for k, v in val.items()},
         }
         history.append(record)
+        tracker.log(epoch_log(record, optimiser.param_groups[0]["lr"]), step=epoch)
         # Select only once beta has reached its final value, so the selected
         # epoch is scored by the objective it was trained for.
         warm = record["beta"] >= config.loss.beta
@@ -346,7 +499,7 @@ def main(
     metrics = {
         "config": config.to_dict(),
         "config_source": str(config_path) if config_path else None,
-        "overrides": list(overrides or []),
+        "overrides": overrides,
         "debug": debug,
         "device": str(device),
         "rotation": config.data.rotation,
@@ -360,6 +513,7 @@ def main(
     }
     config.output.metrics_path.parent.mkdir(parents=True, exist_ok=True)
     config.output.metrics_path.write_text(json.dumps(metrics, indent=2) + "\n")
+    tracker.summary(summary_values(metrics))
     test = reports["test"]
     logger.success(
         f"best epoch {best['epoch']}; test chi2/dof pooled "
