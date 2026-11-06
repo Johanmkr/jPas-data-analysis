@@ -190,6 +190,8 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 # Training artefacts (regenerate with `make train`)
-models/*.pt
+models/**/*.pt
+models/**/*.parquet
 reports/metrics.json
+reports/runs/
 cluster/jobs/
