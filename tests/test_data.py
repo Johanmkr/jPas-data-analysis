@@ -22,6 +22,7 @@ from jpas_da.dataset import (
     drop_duplicate_sources,
     label_flags,
     load_raw,
+    quality_class,
 )
 from jpas_da.splits import split_by_tile
 
@@ -160,6 +161,31 @@ def test_holdout_is_exactly_the_spectroscopic_objects():
     assert not flags.loc[2, "zsp_reliable"], "a ZWARNING redshift was marked reliable"
     assert flags.loc[3, "zsp_reliable"]
     assert not flags.loc[~flags["holdout"], "zsp_reliable"].any()
+
+
+def test_quality_class_follows_the_flag_bits():
+    flags = np.array([0, 1, 2, 3, 4, 16, 0, 0, 0, 1])
+    mask_flags = np.array([0, 0, 0, 0, 0, 0, 1, 2, 3, 1])
+    assert quality_class(flags, mask_flags).tolist() == [
+        "clean",
+        "blend",
+        "blend",
+        "blend",
+        "severe",  # saturated
+        "severe",  # corrupted aperture
+        "window",
+        "severe",  # bright star
+        "severe",  # bright star outranks window
+        "window",  # window outranks blend
+    ]
+
+
+def test_clipped_relative_error_is_masked():
+    data = _synthetic_raw()
+    data.loc[0, ERROR_COLUMN["J0500"]] = 65504.0
+    flux, sigma, mask = build_photometry(data)
+    assert mask.loc[0, "mask_J0500"] == 0
+    assert np.isnan(sigma.loc[0, "sigma_J0500"])
 
 
 def test_drop_duplicate_sources_keeps_the_tightest_sdss_match():

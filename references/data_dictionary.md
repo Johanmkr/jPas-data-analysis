@@ -116,6 +116,21 @@ Columns added by `dataset.py`:
   than the inference set (median r 24.0 against 22.0 for all matches).
 - `zsp_reliable`: holdout object with a `zsp` and `f_zsp == 0`.
 
+## Quality classes
+
+`dataset.py` adds `quality` from the two flag columns (first match wins):
+
+| Class | Rule | Objects | Training |
+|---|---|---|---|
+| `severe` | FLAGS bit >= 4, or MASK_FLAGS bit 2 (bright star) or 4 (artefact) | 3,672 | excluded |
+| `window` | MASK_FLAGS bit 1 only: outside the window frame, less exposure | 3,944 | kept, reported separately |
+| `blend` | FLAGS bits 1 or 2 only: neighbours, blended | 4,112 | kept |
+| `clean` | nothing set | 52,565 | kept |
+
+The 23 pixels whose relative error is clipped at 65504 (the float16 maximum)
+are masked like the `relerr == 0` ones.
+
+
 ## Band scales (`data/interim/band_scales.parquet`)
 
 One row per band: `band`, `b_j`, `n_sigma_defined`, `n_sigma_used`.

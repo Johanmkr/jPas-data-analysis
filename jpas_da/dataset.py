@@ -17,6 +17,12 @@ What it fixes, and why (all measured on the shipped export, 64,327 rows):
   16.7k of them in tile 2241 against 3.7k in tile 2406. They become
   ``sigma = NaN`` with ``mask = 0``, so no downstream step can silently treat
   them as high signal-to-noise.
+* ``|relerr| == 65504`` is the float16 maximum: a clipped value whose derived
+  sigma is an underestimate (23 pixels). Those pixels are masked like the
+  ``relerr == 0`` ones.
+* Every object gets a ``quality`` class (``clean`` / ``blend`` / ``window`` /
+  ``severe``) from the r-band FLAGS and MASK_FLAGS; see :func:`quality_class`.
+  Nothing is dropped here: the training selection happens in :mod:`splits`.
 * 34 ``(tile_id, number)`` pairs are duplicated. Fluxes are identical within
   each group; the duplication lives in the SDSS cross-match (different
   ``angDist``, sometimes different ``zph``). Keep the smallest-``angDist`` row.
@@ -78,6 +84,22 @@ METADATA_COLUMNS = (
 # negative values (zph and e_zph use exactly -9999); MAGrSDSS uses 99.
 SENTINEL_MAX = 0.0
 MAG_SENTINEL_MIN = 30.0
+
+# The relative errors are stored as float16 in the archive: 65504 is the
+# largest finite float16, so |relerr| == 65504 is a clipped value and the
+# absolute error derived from it is an underestimate (23 pixels).
+RELERR_CAP = 65504.0
+
+# SExtractor FLAGS bits 1 (neighbours/bad pixels) and 2 (blended) are common and
+# leave usable photometry; any higher bit (4 saturated, 8 truncated, 16 corrupted
+# aperture, ...) does not. miniJPAS MASK_FLAGS (Bonoli et al. 2021, Table 6):
+# 1 = outside the window frame (less exposure), 2 = bright star or near one,
+# 4 = artefact.
+FLAGS_BENIGN = 1 | 2
+MASK_WINDOW = 1
+MASK_SEVERE = 2 | 4
+QUALITY_CLASSES = ("clean", "blend", "window", "severe")
+TRAINING_QUALITY = ("clean", "blend", "window")
 
 
 def load_raw(path: Path) -> pd.DataFrame:
@@ -180,6 +202,30 @@ def label_flags(meta: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame({"holdout": holdout, "zsp_reliable": zsp_reliable & holdout})
 
 
+def quality_class(flags: np.ndarray, mask_flags: np.ndarray) -> np.ndarray:
+    """One quality label per object from the r-band FLAGS and MASK_FLAGS.
+
+    First match wins:
+
+    * ``severe``: a FLAGS bit above 2 (saturated, truncated, corrupted aperture,
+      ...) or a MASK_FLAGS bright-star/artefact bit. The photometry itself is
+      compromised; excluded from training.
+    * ``window``: outside the window frame only. The object got less exposure,
+      which its quoted errors already carry, so it is kept; evaluation reports it
+      separately.
+    * ``blend``: neighbours or blended (FLAGS bits 1, 2 only).
+    * ``clean``: nothing set.
+    """
+    flags = np.asarray(flags).astype(np.int64)
+    mask_flags = np.asarray(mask_flags).astype(np.int64)
+    quality = np.full(len(flags), "clean", dtype=object)
+    quality[(flags & FLAGS_BENIGN) != 0] = "blend"
+    quality[(mask_flags & MASK_WINDOW) != 0] = "window"
+    severe = ((flags & ~FLAGS_BENIGN) != 0) | ((mask_flags & MASK_SEVERE) != 0)
+    quality[severe] = "severe"
+    return quality
+
+
 def build_photometry(
     data: pd.DataFrame,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -191,7 +237,7 @@ def build_photometry(
     """
     flux = data[list(BAND_NAMES)].to_numpy(dtype=float)
     relerr = data[[ERROR_COLUMN[b] for b in BAND_NAMES]].to_numpy(dtype=float)
-    defined = relerr != 0.0
+    defined = (relerr != 0.0) & (np.abs(relerr) < RELERR_CAP)
     sigma = np.abs(flux * relerr)
     sigma[~defined] = np.nan
 
@@ -201,7 +247,8 @@ def build_photometry(
     n_pixels = flux.size
     logger.info(
         f"{int((~defined).sum()):,}/{n_pixels:,} pixels "
-        f"({100 * (~defined).mean():.2f}%) have no relative error -> masked"
+        f"({100 * (~defined).mean():.2f}%) have no usable relative error -> masked "
+        f"({int((np.abs(relerr) >= RELERR_CAP).sum())} of them clipped at {RELERR_CAP:g})"
     )
     logger.info(
         f"{int((~defined).any(axis=1).sum()):,}/{len(flux):,} objects have >=1 masked band; "
@@ -261,6 +308,9 @@ def build_interim(raw_path: Path = RAW_FILE, output_path: Path = OBJECTS_FILE) -
     )
 
     labels = label_flags(meta)
+    labels["quality"] = quality_class(meta["flag_rSDSS"], meta["mask_flag_rSDSS"])
+    counts = labels["quality"].value_counts()
+    logger.info("quality: " + ", ".join(f"{q} {int(counts.get(q, 0)):,}" for q in QUALITY_CLASSES))
     logger.info(
         f"inference holdout (SDSS spectra): {int(labels['holdout'].sum()):,} objects, "
         f"{int(labels['zsp_reliable'].sum()):,} with a reliable zsp"
