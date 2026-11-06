@@ -321,3 +321,46 @@ def test_kl_is_zero_at_the_prior_and_positive_elsewhere():
     zeros = torch.zeros(2, 3)
     torch.testing.assert_close(kl_per_dim(zeros, zeros), zeros)
     assert (kl_per_dim(torch.ones(2, 3), zeros) > 0).all()
+
+
+# --------------------------------------------------------------------------- #
+# evaluation
+# --------------------------------------------------------------------------- #
+def test_chi2_ignores_masked_bands_and_counts_measured_ones():
+    from jpas_da.modeling.evaluate import chi2_per_object
+
+    g = np.zeros((2, 4))
+    g_hat = np.ones((2, 4))
+    w2 = np.full((2, 4), 0.25)
+    mask = np.array([[1, 1, 1, 1], [1, 1, 0, 0]])
+    g_hat[1, 2:] = 1e6  # masked, must not count
+    chi2, dof = chi2_per_object(g, g_hat, w2, mask)
+    np.testing.assert_allclose(chi2, [16.0, 8.0])
+    np.testing.assert_allclose(dof, [4, 2])
+
+
+def test_reconstruction_report_bins_cover_every_object():
+    from jpas_da.modeling.evaluate import reconstruction_report
+
+    rng = np.random.default_rng(0)
+    n = 200
+    chi2 = rng.chisquare(50, n)
+    dof = np.full(n, 50.0)
+    sig_logr = rng.uniform(0.01, 0.5, n)
+    report = reconstruction_report(
+        chi2, dof, sig_logr, np.repeat([1, 2], n // 2), np.array(["clean"] * n)
+    )
+    assert sum(b["n"] for b in report["by_snr"].values()) == n
+    assert sum(b["n"] for b in report["by_tile"].values()) == n
+    assert abs(report["overall"]["chi2_dof_pooled"] - 1.0) < 0.1
+
+
+def test_latent_report_counts_active_dimensions():
+    from jpas_da.modeling.evaluate import latent_report
+
+    kl = np.zeros((10, 4))
+    kl[:, 0] = 2.0
+    kl[:, 2] = 0.5
+    report = latent_report(kl)
+    assert report["active_dims"] == 2
+    assert report["kl_total"] == pytest.approx(2.5)
