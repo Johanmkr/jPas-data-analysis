@@ -20,6 +20,7 @@ from jpas_da.dataset import (
     build_photometry,
     clean_metadata,
     drop_duplicate_sources,
+    label_flags,
     load_raw,
 )
 from jpas_da.splits import split_by_tile
@@ -146,6 +147,19 @@ def test_sentinels_become_nan():
     assert np.isnan(meta.loc[1, "zsp"])
     assert np.isnan(meta.loc[2, "MAGrSDSS"])
     assert meta.loc[3, "zph"] == pytest.approx(data.loc[3, "zph"])
+
+
+def test_holdout_is_exactly_the_spectroscopic_objects():
+    data = _synthetic_raw()
+    data["spCLASSsdss"] = data["spCLASSsdss"].astype(object)
+    data.loc[[0, 1], "spCLASSsdss"] = np.nan  # photometric-only matches
+    data["f_zsp"] = 0.0
+    data.loc[2, "f_zsp"] = 4.0  # ZWARNING set: ambiguous fit
+    flags = label_flags(clean_metadata(data))
+    assert flags["holdout"].tolist() == [False, False, True, True, True, True]
+    assert not flags.loc[2, "zsp_reliable"], "a ZWARNING redshift was marked reliable"
+    assert flags.loc[3, "zsp_reliable"]
+    assert not flags.loc[~flags["holdout"], "zsp_reliable"].any()
 
 
 def test_drop_duplicate_sources_keeps_the_tightest_sdss_match():

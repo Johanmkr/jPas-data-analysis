@@ -161,6 +161,25 @@ def clean_metadata(data: pd.DataFrame) -> pd.DataFrame:
     return meta
 
 
+def label_flags(meta: pd.DataFrame) -> pd.DataFrame:
+    """Which objects form the inference holdout, and which redshifts to trust.
+
+    * ``holdout``: the object has an SDSS spectrum (``spCLASSsdss`` set; 1,168
+      objects). These are kept for label-based inference and never enter
+      training, validation, testing or any fitted quantity. Photometric-only
+      SDSS matches are *not* held out: the model is unsupervised and never reads
+      their labels, and holding them out would leave training ~2 mag fainter
+      than the inference set.
+    * ``zsp_reliable``: a spectroscopic redshift is present and ``f_zsp`` (the
+      SDSS ``ZWARNING`` bitmask) is 0. 250 holdout objects carry
+      ``ZWARNING = 4`` (small delta chi2, i.e. an ambiguous fit) and a handful
+      carry other bits; their redshifts are kept but not marked reliable.
+    """
+    holdout = meta["spCLASSsdss"].notna().to_numpy()
+    zsp_reliable = (meta["zsp"].notna() & (meta["f_zsp"] == 0)).to_numpy()
+    return pd.DataFrame({"holdout": holdout, "zsp_reliable": zsp_reliable & holdout})
+
+
 def build_photometry(
     data: pd.DataFrame,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -241,10 +260,17 @@ def build_interim(raw_path: Path = RAW_FILE, output_path: Path = OBJECTS_FILE) -
         + meta["number"].astype("int64").astype(str)
     )
 
+    labels = label_flags(meta)
+    logger.info(
+        f"inference holdout (SDSS spectra): {int(labels['holdout'].sum()):,} objects, "
+        f"{int(labels['zsp_reliable'].sum()):,} with a reliable zsp"
+    )
+
     objects = pd.concat(
         [
             pd.DataFrame({"object_id": object_id, "tile_id": meta["tile_id"].astype("int64")}),
             meta.drop(columns="tile_id"),
+            labels,
             flux,
         ],
         axis=1,

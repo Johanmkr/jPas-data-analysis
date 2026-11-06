@@ -94,6 +94,28 @@ in the noisiest bands (`J0910`, `J1007`, `J0900`, `J0378`, `uJPAS`) and in tile
 2241 (16.7k) versus 2406 (3.7k). Treating them as infinite SNR would be wrong,
 so they get `sigma = NaN` and `mask = 0`.
 
+## Labels and the inference holdout
+
+The VAE is trained without labels. Labels exist only for SDSS-matched objects
+and are used later, for inference on the holdout.
+
+| Label | Present for | Reliability |
+|---|---|---|
+| `spCLASSsdss` | 1,168 (685 GALAXY, 245 STAR, 238 QSO) | spectroscopic class; defines the holdout |
+| `zsp` | 973, all inside the holdout | `f_zsp` is the SDSS `ZWARNING` bitmask: 0 = clean (771: 568 GALAXY, 162 QSO, 41 STAR), 4 = small delta chi2, an ambiguous fit (250 holdout objects, 199 of them with a `zsp`). 192 STARs have no `zsp` (negative sentinel). `e_zsp` p99 is 0.7, set by the flagged fits |
+| `photoCLASSsdss` | all 19,873 matches | SDSS morphology, 3 = extended, 6 = point source. Against the spectra: 605/685 GALAXY extended, 232/245 STAR point-like, QSO split 79/159. It is morphology, not class |
+| `zph`, `e_zph` | 12,419 matches | SDSS photo-z. For the 584 holdout galaxies with both: NMAD 0.058, 18.5% outliers (\|dz\|/(1+z) > 0.15). Too noisy to be a target |
+| `avg_zph` | 13,222 (the extended matches) | averaged photo-z, corr 0.70 with `zph` |
+
+Columns added by `dataset.py`:
+
+- `holdout`: `spCLASSsdss` is set. These 1,168 objects (264-319 per tile;
+  median r = 21.5, 5-95% range 17.2-22.7) never enter training, validation,
+  testing or any fitted quantity. Photometric-only matches stay in the
+  training pool, unlabelled: removing them would leave training ~2 mag fainter
+  than the inference set (median r 24.0 against 22.0 for all matches).
+- `zsp_reliable`: holdout object with a `zsp` and `f_zsp == 0`.
+
 ## Band scales (`data/interim/band_scales.parquet`)
 
 One row per band: `band`, `b_j`, `n_sigma_defined`, `n_sigma_used`.
