@@ -4,29 +4,29 @@ build-backend = "flit_core.buildapi"
 
 [project]
 name = "jpas_da"
-version = "0.0.1"
-description = "Analysing the jpas dataset using data science methods and machine learning techniques."
+version = "0.1.0"
+description = "SED-shape analysis of the miniJPAS 60-band photometry: data pipeline, conditional VAE and baselines."
 authors = [
   { name = "Johan Mylius-Kroken" },
 ]
 license = { file = "LICENSE" }
 readme = "README.md"
+keywords = ["astronomy", "miniJPAS", "photometry", "variational autoencoder", "SED"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License"
 ]
+
+# Runtime dependencies only: what `make train`, `make predict` and the cluster
+# image need. Docs, notebooks and lint tooling live in the dev group so that the
+# image (`uv sync --no-dev`) stays as small as it can.
 dependencies = [
-    "altair>=6.2.2",
     "loguru",
-    "mkdocs",
+    "numpy",
     "pandas",
-    "pip",
     "pyarrow>=25.0.1",
-    "pydantic>=2.7",
-    "pytest",
     "python-dotenv",
     "pyyaml>=6.0",
-    "ruff",
     "torch>=2.5",
     "tqdm",
     "typer",
@@ -34,8 +34,9 @@ dependencies = [
 ]
 requires-python = "~=3.10.0"
 
-# torch is resolved from PyPI (CPU wheel on Linux). On a GPU node install it
-# from the matching CUDA index instead; nothing in the code depends on the build.
+# torch is resolved from PyPI. On linux-x86_64 that wheel carries the CUDA
+# runtime and still imports on a CPU-only host, so one image serves both; the
+# GPU driver is never installed here. Nothing in the code depends on the build.
 
 
 [tool.ruff]
@@ -50,11 +51,23 @@ extend-select = ["I"]  # Add import sorting
 known-first-party = ["jpas_da"]
 force-sort-within-sections = true
 
+
 [dependency-groups]
-dev = [
-    "altair>=6.2.2",
-    "marimo>=0.25.2",
+# Installed in the image too: `make smoke` runs the suite inside the container.
+test = [
+    "pytest",
 ]
+dev = [
+    { include-group = "test" },
+    "altair>=6.2.2",       # notebooks
+    "marimo>=0.25.2",      # notebooks
+    "mkdocs",              # documentation site
+    "pymdown-extensions",  # snippets: the site pages include the repo's Markdown
+    "ruff",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 
 [tool.marimo.runtime]

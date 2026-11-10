@@ -1,16 +1,23 @@
+# The image holds code, configs, tests and the job template. Everything that is
+# data, artefact, environment or documentation stays out: data is mounted at
+# /app/{data,models,reports} and docs are read in the repository, not the image.
 .git
-cluster/jobs
-models
+.gitignore
 .venv
 __pycache__
 *.py[cod]
 .pytest_cache
 .ruff_cache
-notebooks
-docs
-reports
-data/raw
-data/interim
-data/external
-data/processed
-vae-normalisation-and-loss.md
+
+# Never bake in data or results
+data/
+models/
+reports/
+cluster/jobs/
+
+# Not needed to run the pipeline
+notebooks/
+docs/
+site/
+mkdocs.yml
+references/

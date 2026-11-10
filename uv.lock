@@ -398,20 +398,15 @@ wheels = [
 
 [[package]]
 name = "jpas-da"
-version = "0.0.1"
+version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "altair" },
     { name = "loguru" },
-    { name = "mkdocs" },
+    { name = "numpy" },
     { name = "pandas" },
-    { name = "pip" },
     { name = "pyarrow" },
-    { name = "pydantic" },
-    { name = "pytest" },
     { name = "python-dotenv" },
     { name = "pyyaml" },
-    { name = "ruff" },
     { name = "torch" },
     { name = "tqdm" },
     { name = "typer" },
@@ -422,21 +417,23 @@ dependencies = [
 dev = [
     { name = "altair" },
     { name = "marimo" },
+    { name = "mkdocs" },
+    { name = "pymdown-extensions" },
+    { name = "pytest" },
+    { name = "ruff" },
+]
+test = [
+    { name = "pytest" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "altair", specifier = ">=6.2.2" },
     { name = "loguru" },
-    { name = "mkdocs" },
+    { name = "numpy" },
     { name = "pandas" },
-    { name = "pip" },
     { name = "pyarrow", specifier = ">=25.0.1" },
-    { name = "pydantic", specifier = ">=2.7" },
-    { name = "pytest" },
     { name = "python-dotenv" },
     { name = "pyyaml", specifier = ">=6.0" },
-    { name = "ruff" },
     { name = "torch", specifier = ">=2.5" },
     { name = "tqdm" },
     { name = "typer" },
@@ -447,7 +444,12 @@ requires-dist = [
 dev = [
     { name = "altair", specifier = ">=6.2.2" },
     { name = "marimo", specifier = ">=0.25.2" },
+    { name = "mkdocs" },
+    { name = "pymdown-extensions" },
+    { name = "pytest" },
+    { name = "ruff" },
 ]
+test = [{ name = "pytest" }]
 
 [[package]]
 name = "jsonschema"
@@ -1019,15 +1021,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/5a/82/42f767fc1c1143d6fd36efb827202a2d997a375e160a71eb2888a925aac1/pathspec-1.1.1.tar.gz", hash = "sha256:17db5ecd524104a120e173814c90367a96a98d07c45b2e10c2f3919fff91bf5a", size = 135180, upload-time = "2026-04-27T01:46:08.907Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/f1/d9/7fb5aa316bc299258e68c73ba3bddbc499654a07f151cba08f6153988714/pathspec-1.1.1-py3-none-any.whl", hash = "sha256:a00ce642f577bf7f473932318056212bc4f8bfdf53128c78bbd5af0b9b20b189", size = 57328, upload-time = "2026-04-27T01:46:07.06Z" },
-]
-
-[[package]]
-name = "pip"
-version = "26.3"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/53/c7/f8d9e2e0e7c1ed8a22a10eeb3b5bf7860bc07d8446c7a978a882c5c8214b/pip-26.3.tar.gz", hash = "sha256:6c36ae7da8695be67e3cd9f7d87919667ced53f57ce2ede75d89b5912ed2bc4c", size = 1934348, upload-time = "2026-11-02T20:34:27.738Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/07/25/ee8c38ae72d66b844ce8eb9711ba905dba21ca1a8a0c960057c41cd23337/pip-26.3-py3-none-any.whl", hash = "sha256:f3b60b20ffaadd4415ed7957212a38ac63fa4c5fa375bd0f4a797777940fad13", size = 1950951, upload-time = "2026-11-02T20:34:25.728Z" },
 ]
 
 [[package]]

@@ -1,15 +1,18 @@
-# Minimal image for jpas_da. The same image runs locally (`make run
-# RUNNER=docker`), in CI and as a Springfield pod: it contains the code, the
-# locked environment and `make`, and nothing else. Data, models and reports are
-# always mounted at /app/{data,models,reports}, never baked in.
+# Portable image for jpas_da. The same image runs locally (`make run
+# RUNNER=docker`), in CI and as a Kubernetes pod on Springfield (UiT) or any
+# other cluster: it contains the code, the locked environment, `make` and the
+# test suite, and nothing else. Data, models and reports are always mounted at
+# /app/{data,models,reports} and never baked in, so the image is portable and
+# small; see references/cluster.md for what is Springfield-specific and must be
+# overridden elsewhere.
 #
-#   make image
-#   make push IMAGE_TAG=$(git rev-parse --short HEAD)
+#   make image                             # tag = git sha
+#   make push                              # build + push <sha> and :latest
+#   docker run --rm -v "$PWD/data:/app/data" ... <image> make train
 #
 # uv.lock resolves torch from PyPI; on linux/amd64 that wheel carries the CUDA
 # runtime and still imports on a CPU-only host, so one image serves both. The
-# driver is injected by the pod (CDI), never installed here. Springfield pulls
-# from a public registry (Docker Hub is the documented path) on linux/amd64.
+# driver is injected by the host or the pod (CDI), never installed here.
 FROM python:3.10-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -38,7 +41,12 @@ COPY pyproject.toml uv.lock ./
 # download cache (~5.6 GB with the CUDA torch wheel) is deleted in this same
 # layer: a later layer cannot shrink an earlier one, and --no-cache would force
 # a full re-resolve on every code change.
-RUN uv sync --frozen --no-dev --no-install-project && rm -rf /root/.cache/uv
+#
+# `--no-dev --group test`: the runtime dependencies plus pytest, because
+# `make smoke` runs the suite inside the image; docs and notebook tooling stay
+# out.
+RUN uv sync --frozen --no-dev --group test --no-install-project \
+    && rm -rf /root/.cache/uv
 
 COPY Makefile ./
 COPY configs ./configs
@@ -51,7 +59,7 @@ COPY cluster ./cluster
 # cache. Deleting it in this same layer keeps the ~5 GB out of the image while
 # leaving the layer cacheable (unlike --no-cache, which forces a full re-resolve
 # on every code change).
-RUN uv sync --frozen --no-dev && rm -rf /root/.cache/uv
+RUN uv sync --frozen --no-dev --group test && rm -rf /root/.cache/uv
 
 # The image already has the exact environment: never re-resolve at run time, and
 # call the venv's python directly instead of `uv run` (which wants the lock).
