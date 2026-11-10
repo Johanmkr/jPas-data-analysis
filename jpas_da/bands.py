@@ -2,7 +2,7 @@
 
 Every module that touches the 60-band axis imports its band order, names and
 wavelengths from here, so the order cannot drift between the raw-to-interim
-step, the feature builder, the models and the plots.
+step, the feature builder, the models and the notebook.
 
 The order is deliberately *not* strictly wavelength-sorted. It keeps the 54
 narrow bands contiguous (they form the evenly sampled J-spectrum, which is the
@@ -10,10 +10,15 @@ physically meaningful axis) and appends the remaining filters as their own
 blocks:
 
     block      n   members
-    narrow    54  J0378 ... J0910, FWHM ~145 A, 10 A grid
+    narrow    54  J0378 ... J0910, FWHM ~145 A, 100 A grid (120 A for the first step)
     medium     1  uJAVA  (FWHM 495 A, centred 3497 A)
     broad      4  uJPAS, gSDSS, rSDSS, iSDSS
     highpass   1  J1007  (high-pass, centred 9316 A)
+
+Wavelength units: ``wavelength_aa`` is **always Angstrom**, for all 60 bands.
+The narrow filter names encode nanometres (``J0378`` = 378 nm = 3780 A), so the
+name is multiplied by 10 when the table is built; everything else is already in
+Angstrom.
 
 Filter taxonomy, the 145 A / 100 A grid and the uJAVA/J1007 central
 wavelengths are from the miniJPAS description (Bonoli et al. 2021; see also
@@ -72,7 +77,8 @@ class Band:
 
 def _make_band(name: str, block: str) -> Band:
     if block == "narrow":
-        wavelength = float(name[1:])
+        # Filter names encode nanometres: J0378 -> 378 nm -> 3780 A.
+        wavelength = float(name[1:]) * 10.0
         source = "name"
     else:
         wavelength = _NOMINAL_WAVELENGTH[name]

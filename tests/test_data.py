@@ -49,6 +49,22 @@ def test_narrow_bands_form_a_uniform_grid():
     assert (steps[1:] == 10.0).all()
 
 
+def test_every_band_wavelength_is_angstrom():
+    """All 60 bands share one unit.
+
+    The narrow filter names encode nanometres (`J0378` is 378 nm); reading them
+    verbatim put them a factor of 10 below the broad bands, which are given in
+    Angstrom. Pin the unit so the axis cannot silently mix scales again.
+    """
+    from jpas_da.bands import wavelengths
+
+    narrow = np.array(wavelengths("narrow"))
+    assert narrow[0] == 3780.0
+    assert narrow[-1] == 9100.0
+    assert (np.diff(narrow) > 0).all(), "the narrow axis must be strictly increasing"
+    assert 3000.0 < min(wavelengths()) and max(wavelengths()) < 11000.0
+
+
 def test_error_columns_follow_the_band_order():
     assert [ERROR_COLUMN[b] for b in BAND_NAMES] == [f"e{b}" for b in BAND_NAMES]
 
