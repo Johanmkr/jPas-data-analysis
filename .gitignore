@@ -195,3 +195,7 @@ models/**/*.parquet
 reports/metrics.json
 reports/runs/
 cluster/jobs/
+
+# marimo session cache (9 MB of cell state, regenerated on open)
+notebooks/__marimo__/
+__marimo__/
