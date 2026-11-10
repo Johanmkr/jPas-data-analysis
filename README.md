@@ -5,11 +5,12 @@ methods: a spectral-energy-distribution (SED) **shape** embedding from a conditi
 variational autoencoder, scored against weighted-PCA and asinh-PCA baselines.
 
 The data are 64,293 objects observed in four overlapping pointings (tiles) in 54 narrow
+
 + 6 broad/medium filters. Brightness is divided out per object, so the latent describes
 the *shape* of the SED given brightness; brightness itself is a condition.
 
 | | |
-|---|---|
+| --- | --- |
 | Code | `jpas_da/` — data pipeline, model, training, evaluation, cluster renderer |
 | Config | `configs/vae.yaml` — every model/loss/training knob |
 | Docs | this file, `references/`, and the mkdocs site (`uv run mkdocs serve`) |
@@ -56,7 +57,7 @@ flowchart LR
 ```
 
 | Target | What it does |
-|---|---|
+| --- | --- |
 | `make data` | raw export → interim table, splits, `vae_inputs.npz` (4 s) |
 | `make train` | one rotation (`data.rotation`); `DEBUG=1` for the tiny run, `CONFIG=` / `SET="--set ..."` to override |
 | `make train-debug` | 1,024 objects, 2 epochs — smoke test |
@@ -71,11 +72,11 @@ flowchart LR
 
 ### Data
 
-- **Holdout:** the 1,168 objects with SDSS spectra are kept for label-based inference and
++ **Holdout:** the 1,168 objects with SDSS spectra are kept for label-based inference and
   never enter training, validation, testing or a fitted quantity.
-- **Quality:** `severe` objects (saturated, truncated, corrupted aperture, or near a bright
++ **Quality:** `severe` objects (saturated, truncated, corrupted aperture, or near a bright
   star; 3,672) are excluded. Blends and objects outside the window frame are kept.
-- **Splits:** rotation *k* tests on tile *k*, validates on tile *k+1*, trains on the other
++ **Splits:** rotation *k* tests on tile *k*, validates on tile *k+1*, trains on the other
   two, so the test tile is never used for a choice.
 
 Full counts and the column-by-column dictionary: `references/data_dictionary.md`.
@@ -135,7 +136,7 @@ written. The entity is whatever your API key defaults to, so your own account wo
 no configuration; set `WANDB_ENTITY` (or `--wandb-entity`) to log into a shared team.
 
 | Variable | Default |
-|---|---|
+| --- | --- |
 | `WANDB_PROJECT` (or `--wandb-project`) | `jpas-da` |
 | `WANDB_ENTITY` (or `--wandb-entity`) | the API key's default entity |
 | `WANDB_RUN_NAME` | the sweep run directory, else `<encoder>-d<size>-r<rotation>` |
@@ -147,7 +148,7 @@ no configuration; set `WANDB_ENTITY` (or `--wandb-entity`) to log into a shared 
 at d = 8) and both baselines at the same sizes; pooled test χ²/dof, mean over rotations:
 
 | model | d = 4 | d = 8 | d = 16 | active dims (d = 4/8/16) |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | VAE, conv encoder | 1.390 ±0.03 | 1.400 ±0.05 | 1.434 ±0.10 | 4.0 / 3.8 / 4.2 |
 | VAE, `[g, mask]` | – | 1.385 ±0.04 | – | – / 4.5 / – |
 | VAE, MLP encoder | – | 1.454 ±0.07 | – | – / 5.2 / – |
@@ -171,7 +172,7 @@ make run TARGET=train RUNNER=cluster        # render + submit the cluster Job
 ```
 
 | | data in | models out | reports out |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | local | `data/` | `models/` | `reports/` |
 | container | `-v $PWD/data:/app/data` | `-v $PWD/models:/app/models` | `-v $PWD/reports:/app/reports` |
 | cluster | `<PVC>/<STORAGE_ROOT>/data` → `/app/data` | `…/runs/<job>/models` → `/app/models` | `…/runs/<job>/reports` → `/app/reports` |
@@ -224,7 +225,7 @@ which rebuilds the interim table and the arrays there in about five seconds. Con
 from the image (that is what makes `<sha>` a complete description of the run).
 
 | Parameter | Default | Meaning |
-|---|---|---|
+| --- | --- | --- |
 | `TARGET` / `JOB` | `train` / `$(TARGET)-$(IMAGE_TAG)` | make target, and the Job name |
 | `IMAGE` | `johanmkr/jpas-da:<git sha>` | image to run; the tag records the code |
 | `CONFIG` / `SET` / `DEBUG` | `configs/vae.yaml` / empty / `0` | passed as make variables, not baked into the manifest |
@@ -313,3 +314,4 @@ loads `models/vae.pt` and checks it against the mean-shape baseline. It needs `m
 ## License
 
 MIT, see `LICENSE`.
+
