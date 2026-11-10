@@ -64,7 +64,14 @@ DEBUG_EVAL_OBJECTS = 2048
 """Validation/test objects scored per epoch in ``--debug`` runs."""
 
 WANDB_PROJECT = "jpas-da"
-WANDB_ENTITY = "johan-m-kroken-uit-norges-arktiske-universitet"
+"""Default project. Override with ``WANDB_PROJECT`` or ``--wandb-project``."""
+
+WANDB_ENTITY = ""
+"""Default entity: empty means "the API key's own default entity".
+
+Hard-coding a personal entity makes a collaborator's first run fail with a
+permissions error unless they happen to belong to it.
+"""
 
 
 # --------------------------------------------------------------------------- #
@@ -123,7 +130,9 @@ def start_wandb(config: Config, debug: bool, overrides: list[str]) -> tuple[Trac
         return Tracker(wandb.run), False
     run = wandb.init(
         project=os.environ.get("WANDB_PROJECT", WANDB_PROJECT),
-        entity=os.environ.get("WANDB_ENTITY", WANDB_ENTITY),
+        # None lets wandb use the default entity of the API key, so a
+        # collaborator's own account works without configuring anything.
+        entity=os.environ.get("WANDB_ENTITY", WANDB_ENTITY) or None,
         name=run_name(config, debug),
         group=os.environ.get("WANDB_GROUP"),
         job_type="debug" if debug else "train",
