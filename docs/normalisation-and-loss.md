@@ -1,0 +1,1 @@
+--8<-- "references/vae-normalisation-and-loss.md"

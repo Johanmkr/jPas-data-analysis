@@ -322,6 +322,24 @@ notebook: requirements
 	uv run marimo edit $(NOTEBOOK)
 
 
+## Serve the documentation site with live reload (http://127.0.0.1:8000)
+.PHONY: docs
+docs: requirements
+	uv run mkdocs serve
+
+
+## Build the documentation site into site/ (checks every internal link)
+.PHONY: docs-build
+docs-build: requirements
+	uv run mkdocs build --strict
+
+
+## Everything a reviewer should see pass: lint, tests, docs, data pipeline
+.PHONY: check
+check: lint test docs-build
+	$(MAKE) data
+	@echo ">>> check: lint, 113 tests, docs build and the full data pipeline all pass"
+
 #################################################################################
 # Self Documenting Commands                                                     #
 #################################################################################

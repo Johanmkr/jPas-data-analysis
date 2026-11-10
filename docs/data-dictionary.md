@@ -1,0 +1,1 @@
+--8<-- "references/data_dictionary.md"

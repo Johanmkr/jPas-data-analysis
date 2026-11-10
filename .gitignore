@@ -199,3 +199,6 @@ cluster/jobs/
 # marimo session cache (9 MB of cell state, regenerated on open)
 notebooks/__marimo__/
 __marimo__/
+
+# mkdocs build output
+/site

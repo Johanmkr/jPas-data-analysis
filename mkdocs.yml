@@ -1,0 +1,52 @@
+# Documentation site for jpas_da.
+#
+#   uv run mkdocs serve      # http://127.0.0.1:8000, live reload
+#   uv run mkdocs build      # static site in site/
+#
+# The pages are thin wrappers: each one pulls in a Markdown file that lives at
+# its natural place in the repository (README.md, references/*.md) with
+# pymdownx.snippets, so the site and the repository can never disagree about
+# what the docs say. Edit the source file, not the wrapper.
+site_name: jpas_da
+site_description: SED-shape analysis of the miniJPAS 60-band photometry
+site_author: Johan Mylius-Kroken
+
+docs_dir: docs
+site_dir: site
+
+theme:
+  name: readthedocs
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.arithmatex:
+      generic: true
+  - pymdownx.details
+  - pymdownx.snippets:
+      # Resolved from the repository root (the directory mkdocs runs in).
+      base_path: ["."]
+      check_paths: true
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+
+extra_javascript:
+  - javascripts/mathjax.js
+  - https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js
+  - https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js
+
+nav:
+  - Overview: index.md
+  - Getting started: getting-started.md
+  - Data sources: data-sources.md
+  - Running on a cluster: cluster.md
+  - Data dictionary: data-dictionary.md
+  - Pipeline design: pipeline-plan.md
+  - Normalisation and loss: normalisation-and-loss.md

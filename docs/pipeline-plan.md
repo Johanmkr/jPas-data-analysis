@@ -1,0 +1,1 @@
+--8<-- "references/pipeline-v2-plan.md"
