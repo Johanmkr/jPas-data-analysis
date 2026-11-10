@@ -81,6 +81,13 @@ def build(objects_path: Path | None = None, output_path: Path = SPLITS_FILE) -> 
     recomputes them with :func:`assign_roles`, so they cannot disagree.
     """
     objects_path = objects_path or INTERIM_DATA_DIR / "objects.parquet"
+    if not Path(objects_path).exists():
+        raise FileNotFoundError(
+            f"interim table not found: {objects_path}\n"
+            "It is built from the raw export by `make interim` (or `make data`), which\n"
+            "needs data/raw/miniJpas_fluxes_errors_redshifts_full.csv; see\n"
+            "references/getting-started.md, section 2."
+        )
     objects = pd.read_parquet(objects_path, columns=["object_id", "tile_id", "holdout", "quality"])
     table = objects.copy()
     for k in range(n_rotations(objects["tile_id"])):

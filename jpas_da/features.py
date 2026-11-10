@@ -118,6 +118,13 @@ def build(
     objects_path: Path = OBJECTS_FILE, output_path: Path = MODEL_DATA_FILE
 ) -> dict[str, np.ndarray]:
     """Write the model-ready arrays with the identifiers the loader needs."""
+    if not Path(objects_path).exists():
+        raise FileNotFoundError(
+            f"interim table not found: {objects_path}\n"
+            "It is built from the raw export by `make interim` (or `make data`), which\n"
+            "needs data/raw/miniJpas_fluxes_errors_redshifts_full.csv; see\n"
+            "references/getting-started.md, section 2."
+        )
     objects = pd.read_parquet(objects_path)
     if objects["object_id"].duplicated().any():
         raise ValueError("duplicated object_id in the interim table")

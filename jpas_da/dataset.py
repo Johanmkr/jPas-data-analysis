@@ -8,15 +8,16 @@ representation; that is :mod:`jpas_da.features`.
 What it fixes, and why (all measured on the shipped export, 64,327 rows):
 
 * ``FLUX_RELERR_AUTO`` is a *signed relative* error, not an absolute one.
-  It agrees in sign with the flux for 99.1% of pixels, and ``1/|rel|`` behaves
-  as the signal-to-noise ratio (median 1.1 in a narrow band, 4.6 in rSDSS).
-  So ``sigma_f = |flux * relerr|``.
+  Where it is defined it agrees in sign with the flux for 100% of cells (99.1%
+  including the ``relerr == 0`` cells, where the sign is meaningless), and
+  ``1/|rel|`` behaves as the signal-to-noise ratio (median 1.06 in J0450, 4.63
+  in rSDSS). So ``sigma_f = |flux * relerr|``.
 * ``relerr == 0`` means the uncertainty was not computed, not that the source
-  is infinitely bright: 0.94% of pixels, concentrated on faint pixels of faint
-  objects and in the noisiest bands (J0910, J1007, J0900, J0378, uJPAS), and
-  16.7k of them in tile 2241 against 3.7k in tile 2406. They become
-  ``sigma = NaN`` with ``mask = 0``, so no downstream step can silently treat
-  them as high signal-to-noise.
+  is infinitely bright: 1.009% of all cells (0.94% of those with a non-zero
+  flux), concentrated on faint pixels of faint objects and in the noisiest
+  bands (J0910, J1007, J0900, J0378, uJPAS), and 17.9k of them in tile 2241
+  against 3.8k in tile 2406. They become ``sigma = NaN`` with ``mask = 0``, so
+  no downstream step can silently treat them as high signal-to-noise.
 * ``|relerr| == 65504`` is the float16 maximum: a clipped value whose derived
   sigma is an underestimate (23 pixels). Those pixels are masked like the
   ``relerr == 0`` ones.
@@ -106,7 +107,20 @@ def load_raw(path: Path) -> pd.DataFrame:
 
     The file starts with the SQL query used to produce it (a single,
     comma-separated line). Skip that line when it is present.
+
+    ``data/`` is git-ignored, so a fresh clone does not have this file: the
+    error says where to get it instead of raising a bare ``FileNotFoundError``
+    from inside pandas.
     """
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(
+            f"raw export not found: {path}\n"
+            "data/ is git-ignored, so it is not in a clone. Produce the CSV with\n"
+            "references/queries/minijpas_flux_with_errors_full.txt (see\n"
+            "references/queries/README.md and references/getting-started.md, section 2)\n"
+            "and place it at that path, or pass --input-path explicitly."
+        )
     with path.open() as f:
         first_line = f.readline()
 
