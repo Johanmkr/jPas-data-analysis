@@ -1,4 +1,6 @@
 .git
+cluster/jobs
+models
 .venv
 __pycache__
 *.py[cod]

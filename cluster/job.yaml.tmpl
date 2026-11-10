@@ -1,3 +1,9 @@
+# One Kubernetes Job, rendered by `python -m jpas_da.cluster` (`make job`).
+# Every "$" placeholder below comes from a make variable; see the table in README.md.
+# The generated manifest lives in cluster/jobs/ and is not committed.
+#
+# `namespace:` is dropped when NAMESPACE is empty, so kubectl/frink use the
+# namespace of the current context instead.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -8,26 +14,55 @@ metadata:
     target: ${TARGET_SAFE}
 spec:
   backoffLimit: ${BACKOFF_LIMIT}
+  # Hard cap: a stuck run must not hold a GPU until someone notices.
+  activeDeadlineSeconds: ${DEADLINE}
   ttlSecondsAfterFinished: ${TTL_SECONDS}
   template:
     metadata:
       labels:
         app: jpas-da
+        target: ${TARGET_SAFE}
     spec:
       restartPolicy: Never
+      # kubelet does not create subPath directories, so make them on the claim
+      # first. The same image is used: no extra pull, no extra registry.
+      initContainers:
+        - name: prepare
+          image: ${IMAGE}
+          command:
+            - sh
+            - -c
+            - mkdir -p /storage/${DATA_SUBPATH} /storage/${JOB_SUBPATH}/models /storage/${JOB_SUBPATH}/reports
+          volumeMounts:
+            - name: storage
+              mountPath: /storage
       containers:
         - name: jpas-da
           image: ${IMAGE}
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: ${PULL_POLICY}
+          workingDir: /app
+          # The same make target you run locally. CONFIG/SET/DEBUG are make
+          # variables read from the environment, so one job = one make call.
           command: ["make", "${TARGET}"]
           env:
             - name: UV_NO_SYNC
               value: "1"
+            - name: CONFIG
+              value: "${CONFIG}"
+            - name: SET
+              value: "${SET}"
+            - name: DEBUG
+              value: "${DEBUG}"
+            # Springfield injects the device via CDI and may leave
+            # CUDA_VISIBLE_DEVICES empty, which torch reads as "no GPU".
+            - name: CUDA_VISIBLE_DEVICES
+              value: "${GPU_DEVICES}"
+            # Present only if the secret exists; the pipeline runs without it.
             - name: WANDB_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: ${WANDB_SECRET}
-                  key: api-key
+                  key: ${WANDB_SECRET_KEY}
                   optional: true
           resources:
             requests:
@@ -37,17 +72,28 @@ spec:
               cpu: "${CPU}"
               memory: "${MEMORY}"
               nvidia.com/gpu: "${GPU_COUNT}"
+          # Same paths as a local run or `make run`: data/, models/, reports/.
           volumeMounts:
             - name: storage
               mountPath: /app/data
-              subPath: data
+              subPath: ${DATA_SUBPATH}
             - name: storage
               mountPath: /app/models
-              subPath: models/${JOB_NAME}
+              subPath: ${JOB_SUBPATH}/models
             - name: storage
               mountPath: /app/reports
-              subPath: reports/${JOB_NAME}
+              subPath: ${JOB_SUBPATH}/reports
       volumes:
         - name: storage
           persistentVolumeClaim:
             claimName: ${PVC}
+      # Optional, from https://uitml.github.io/springfield/getting-started.html:
+      # pin a GPU family (gtx-1080-ti, rtx-2080-ti, rtx-3090, rtx-A6000)
+      # nodeSelector:
+      #   springfield.uit.no/gpu-type: rtx-3090
+      # and, for a >24 GB A6000, the matching toleration:
+      # tolerations:
+      #   - key: vram
+      #     operator: Equal
+      #     value: high
+      #     effect: NoSchedule

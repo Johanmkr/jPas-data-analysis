@@ -86,8 +86,9 @@ flowchart LR
 | `make sweep` | local sweep: `STAGE=size` (latent 4/8/16 × 4 rotations) or `STAGE=ablation DIM=<d>`; resumable |
 | `make report` | all runs and baselines → `reports/sweep_v2.md` |
 | `make predict` | encode every object (all roles, incl. holdout) into `models/vae_latents.parquet` |
-| `make docker-build` / `make docker-train` | build the CPU image, run the debug path in it |
-| `make smoke` | `train-debug` plus `pytest` |
+| `make run TARGET=<t> RUNNER=local\|docker\|cluster` | the same target here, in the image, or as a Job |
+| `make image` / `make push` | build, then push `johanmkr/jpas-da:<sha>` |
+| `make smoke` / `make smoke-docker` / `make smoke-cluster` | `train-debug` + `pytest` on the host, in the image, or as a CPU Job on Springfield |
 
 ### Data
 
@@ -167,49 +168,89 @@ validation chi2/dof (overall, by S/N and by quality) and active dimensions.
 | `WANDB_RUN_NAME` | the sweep run directory, else `<encoder>-d<size>-r<rotation>` |
 | `WANDB_GROUP` | none; `make sweep` sets `sweep-<variant>` |
 
-### Docker / cluster
+### Local, container, cluster: the same target
 
-The image is CPU by default; on a GPU node install torch from the matching CUDA
-index and set `train.device: cuda` (or `--set train.device=cuda`). The image
-does not contain data — mount it:
-
-```bash
-make docker-build
-docker run --rm -v "$PWD/data:/app/data" -v "$PWD/models:/app/models" \
-  -v "$PWD/reports:/app/reports" jpas-da:dev make train-debug
-```
-
-The image installs `make`, the test suite and the locked environment;
-`UV_NO_SYNC=1` is set so the container never re-resolves dependencies at run
-time. `make docker-train` is the one check this pipeline cannot run inside the
-sandbox it was developed in (no Docker daemon, no `CAP_SYS_ADMIN`); run it once
-on a host with Docker before trusting the image for a cluster run.
-
-### Cluster jobs
-
-`cluster/job.yaml.tmpl` is one parametrised Kubernetes Job; `jpas_da/cluster.py`
-fills it in and validates the result, and `make job` writes the manifest to
-`cluster/jobs/` (git-ignored). Rendering never contacts the cluster.
+One make target runs in three places, and nothing about the pipeline changes
+between them. `make run` is the switch:
 
 ```bash
-make job TARGET=train IMAGE_TAG=$(git rev-parse --short HEAD)
-make job TARGET=train-debug GPU_COUNT=0      # CPU smoke job
-kubectl apply -f cluster/jobs/train-<sha>.yaml   # your call, not the pipeline's
+make run TARGET=train-debug                 # local: uv run, host data/
+make run TARGET=train-debug RUNNER=docker   # the image: /app/{data,models,reports}
+make run TARGET=train RUNNER=cluster        # render + submit the Springfield Job
 ```
+
+| | data in | models out | reports out |
+|---|---|---|---|
+| local | `data/` | `models/` | `reports/` |
+| container | `-v $PWD/data:/app/data` | `-v $PWD/models:/app/models` | `-v $PWD/reports:/app/reports` |
+| Springfield | `<PVC>/<STORAGE_ROOT>/data` → `/app/data` | `…/runs/<job>/models` → `/app/models` | `…/runs/<job>/reports` → `/app/reports` |
+
+The pod runs `["make", "<TARGET>"]` in the same image with the same
+environment, so a job names a make target, not a script path or a second copy of
+the arguments.
+
+### Image
+
+`make image` builds the CPU/GPU-agnostic image (`johanmkr/jpas-da:<git sha>`).
+`uv.lock` pins torch from PyPI, which on linux-x86_64 is the CUDA build; it
+imports and runs on a CPU-only host. `train.device: auto` therefore picks `cuda`
+in a GPU pod and `cpu` everywhere else. Data is never baked in: the image has
+code, configs and the locked environment.
+
+```bash
+make image                                  # tag = <git sha>, or <sha>-dirty
+make push                                   # build + push to Docker Hub
+make push REGISTRY=<user> IMAGE_TAG=dev     # override
+```
+
+The tag carries `-dirty` while the tree has uncommitted changes, so a local
+build can never be mistaken for the image of commit `<sha>`. Commit before
+tagging anything you intend to keep; note that `make image` also moves
+`$(IMAGE_NAME):latest` unless you pass `IMAGE_TAG`.
+
+`make smoke-docker` runs the same smoke path as `make smoke` inside the image
+and then renders the smoke Job, i.e. the whole local→cluster chain, without
+contacting the cluster.
+
+### Springfield jobs
+
+`cluster/job.yaml.tmpl` is one parametrised Job, filled in and validated by
+`jpas_da/cluster.py`; `make job` writes it to `cluster/jobs/` (git-ignored) and
+`make submit` hands it to `frink`. Rendering never contacts the cluster.
+
+```bash
+make sync-up                     # data/raw -> <PVC>/<STORAGE_ROOT>/data/raw
+make job TARGET=train            # render cluster/jobs/train-<sha>.yaml
+make submit TARGET=train         # render + frink run
+make job-logs JOB=train-<sha>    # frink logs
+make sync-down JOB=train-<sha>   # models/ + reports/ back into the repo
+make job-delete JOB=train-<sha>
+```
+
+Only the 78 MB raw CSV needs to reach the claim: `make train` depends on
+`make data`, which rebuilds the interim table and `vae_inputs.npz` there in
+about three seconds. Prebuilt tables can be mirrored instead with
+`make sync-up SYNC_SRC=data/`. Configs come from the image (that is what makes
+`<sha>` a complete description of the run), not from the claim.
 
 | Parameter | Default | Meaning |
 |---|---|---|
-| `IMAGE` | `jpas-da:<git sha>` | image to run, tagged so the pod runs the built code |
-| `TARGET` | `train` | the single make target executed in the container |
-| `GPU_COUNT` | `1` | `0` omits the `nvidia.com/gpu` limit entirely |
+| `TARGET` / `JOB` | `train` / `$(TARGET)-$(IMAGE_TAG)` | make target, and the Job name |
+| `IMAGE` | `johanmkr/jpas-da:<git sha>` | image to run; the tag records the code |
+| `CONFIG` / `SET` / `DEBUG` | `configs/vae.yaml` / empty / `0` | passed as make variables, not baked into the manifest |
+| `GPU_COUNT` / `GPU_DEVICES` | `1` / `0` | `GPU_COUNT=0` drops the `nvidia.com/gpu` limit; devices set `CUDA_VISIBLE_DEVICES` (CDI may leave it empty) |
 | `CPU` / `MEMORY` | `4` / `16Gi` | requests and limits |
-| `PVC` / `NAMESPACE` | `jpas-storage` / `default` | where data and outputs live |
+| `DEADLINE` | `86400` | `activeDeadlineSeconds`: a stuck run cannot hold a GPU |
+| `PVC` / `STORAGE_ROOT` | `storage` / `projects/jpas_da` | Springfield gives every namespace a `storage` claim mounted at `/storage` |
+| `SPRINGFIELD` | `springfield` | `~/.ssh/config` host for the storage proxy |
 
-The job mounts the claim at `/app/data` (the pipeline inputs), and writes
-`models/<job>` and `reports/<job>` so concurrent runs cannot overwrite each
-other. `WANDB_API_KEY` is pulled from the `wandb-api` secret when it exists; the
-pipeline does not need it. `make submit`, `make job-logs` and `make job-delete`
-wrap the matching `kubectl` calls.
+`WANDB_API_KEY` comes from the `wandb-secret`/`api-key` secret when it exists
+(`kubectl create secret generic wandb-secret --from-literal=api-key=…`); the
+pipeline runs without it. An init container creates the `subPath` directories,
+because the kubelet does not. A first run is `make sync-up`, `make push`,
+`make submit`; to pin a GPU family (gtx-1080-ti, rtx-2080-ti, rtx-3090,
+rtx-A6000) or request an A6000 (>24 GB), uncomment the
+`nodeSelector`/`tolerations` block at the bottom of `cluster/job.yaml.tmpl`.
 
 --------
 

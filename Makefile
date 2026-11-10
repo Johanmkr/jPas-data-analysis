@@ -4,8 +4,9 @@
 
 PROJECT_NAME = jpas_da
 PYTHON_VERSION = 3.10
-# `uv run` guarantees the project environment regardless of which shell starts
-# make, and is a no-op inside the Docker image (UV_NO_SYNC=1 there).
+# `uv run` guarantees the project environment whatever shell starts make. In the
+# image UV_NO_SYNC=1 and /app/.venv/bin is on PATH, so the venv's `python` is
+# used and nothing is re-resolved.
 PYTHON_INTERPRETER ?= uv run python
 
 # Config file and per-run overrides for the VAE targets, e.g.
@@ -13,16 +14,66 @@ PYTHON_INTERPRETER ?= uv run python
 CONFIG ?= configs/vae.yaml
 SET ?=
 
-# Cluster job parameters (see cluster/job.yaml.tmpl and `make job`).
-IMAGE_TAG ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
-IMAGE ?= jpas-da:$(IMAGE_TAG)
-TARGET ?= train
-GPU_COUNT ?= 1
-
 # `make train DEBUG=1` is the smoke path the objective names; `--debug` caps
 # the run at train.debug_epochs on train.debug_objects.
 DEBUG ?= 0
 TRAIN_FLAGS = $(if $(filter 1 true yes,$(DEBUG)),--debug,)
+
+#################################################################################
+# WHERE A TARGET RUNS                                                           #
+#################################################################################
+# One target, three places. `make run TARGET=train` is the only entry point that
+# differs: locally it is `make train`, inside the image it is
+# `docker run ... make train`, on Springfield it is a Job whose command is
+# ["make", "train"]. Paths under /app are identical in all three, and the
+# cluster mounts the claim at the same subPaths (see cluster/job.yaml.tmpl).
+
+# local -> this machine. docker -> the image, so the cluster path is rehearsed.
+RUNNER ?= local
+DOCKER ?= docker
+# Pass --gpus all only on a host with the NVIDIA runtime; the container then
+# sees what a Springfield pod sees (torch picks cuda in `train.device: auto`).
+DOCKER_GPU ?=
+
+REGISTRY ?= johanmkr
+IMAGE_NAME ?= $(REGISTRY)/jpas-da
+# The tag names the code in the image. `-dirty` is appended when the tree does
+# not match HEAD (unstaged, staged or untracked changes), so an image built from
+# uncommitted code can never masquerade as the commit's image.
+GIT_STATE = $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)$(shell git status --porcelain 2>/dev/null | grep -q . && echo -dirty)
+IMAGE_TAG ?= $(GIT_STATE)
+IMAGE ?= $(IMAGE_NAME):$(IMAGE_TAG)
+
+# Springfield nodes are x86_64; build for that even from an ARM laptop.
+PLATFORM ?= linux/amd64
+
+# Mount the host tree the image expects: inputs in, artefacts out. Existing
+# files stay owned by you (`--user`), HOME is writable for caches.
+DOCKER_MOUNTS = -v "$(CURDIR)/data:/app/data" \
+                -v "$(CURDIR)/models:/app/models" \
+                -v "$(CURDIR)/reports:/app/reports"
+DOCKER_FLAGS = --rm $(DOCKER_GPU) $(DOCKER_MOUNTS) \
+               --user "$$(id -u):$$(id -g)" -e HOME=/tmp \
+               -e CONFIG="$(CONFIG)" -e SET="$(SET)" -e DEBUG="$(DEBUG)" \
+               $(if $(wildcard .env),--env-file .env,)
+
+#################################################################################
+# CLUSTER JOB PARAMETERS                                                        #
+#################################################################################
+# See cluster/job.yaml.tmpl and `make job`; every value is a make variable.
+TARGET ?= train
+# Job name = make target + the image's tag, so a job records which code it ran.
+# Derived from IMAGE, not IMAGE_TAG: overriding IMAGE must rename the job too.
+JOB_TAG = $(lastword $(subst :, ,$(IMAGE)))
+JOB ?= $(TARGET)-$(JOB_TAG)
+GPU_COUNT ?= 1
+CPU ?= 4
+MEMORY ?= 16Gi
+DEADLINE ?= 86400
+# Directory inside the claim (Springfield: the `storage` PVC, mounted at /storage).
+STORAGE_ROOT ?= projects/jpas_da
+SPRINGFIELD ?= springfield
+FRINK ?= frink
 
 #################################################################################
 # COMMANDS                                                                      #
@@ -145,57 +196,125 @@ report:
 	$(PYTHON_INTERPRETER) -m jpas_da.modeling.report
 
 
-## Build the CPU training image
-.PHONY: docker-build
-docker-build:
-	docker build -t jpas-da:dev .
+## Build the image (linux/amd64 by default: that is what Springfield runs)
+.PHONY: image
+image:
+	$(DOCKER) build --platform $(PLATFORM) -t $(IMAGE) -t $(IMAGE_NAME):latest .
 
 
-## Run the debug training inside the image, with the host data mounted
-.PHONY: docker-train
-docker-train: docker-build
-	docker run --rm \
-		-v "$(CURDIR)/data:/app/data" \
-		-v "$(CURDIR)/models:/app/models" \
-		-v "$(CURDIR)/reports:/app/reports" \
-		jpas-da:dev make train-debug
+## Push the image the cluster will pull (Springfield pulls from Docker Hub)
+# Both tags go up, so the manifest never references an unpushed image. Code
+# that is not committed is not pushed: a `<sha>-dirty` image cannot be rebuilt
+# from the repository, which defeats the point of tagging by commit. The check
+# runs before the build, so a refused push costs no build time.
+.PHONY: push
+push:
+	@case "$(IMAGE_TAG)" in *-dirty) \
+		echo "refusing to push $(IMAGE): the tree has uncommitted changes; commit first" >&2; \
+		exit 1;; esac
+	$(MAKE) image
+	$(DOCKER) push $(IMAGE)
+	$(DOCKER) push $(IMAGE_NAME):latest
+
+
+## Run any target wherever it belongs: local (default), docker, or cluster
+#   make run TARGET=train-debug            # same shell, same data/
+#   make run TARGET=train-debug RUNNER=docker
+#   make run TARGET=train RUNNER=cluster   # render + submit the Job
+.PHONY: run
+run:
+ifeq ($(filter $(RUNNER),local docker cluster),)
+	$(error RUNNER must be local, docker or cluster; got '$(RUNNER)')
+endif
+ifeq ($(RUNNER),local)
+	$(MAKE) $(TARGET)
+else ifeq ($(RUNNER),docker)
+	$(DOCKER) run $(DOCKER_FLAGS) $(IMAGE) make $(TARGET)
+else
+	$(MAKE) submit TARGET=$(TARGET)
+endif
+
+
+## Input data on the cluster: push the raw export to the claim
+#   make sync-up                  # data/raw; the pod rebuilds the tables in seconds
+#   make sync-up SYNC_SRC=data/   # mirror every derived table instead
+#   make sync-up DRY=1            # show what would change, change nothing
+.PHONY: sync-up
+# `SYNC_SRC` is a directory whose contents go to <STORAGE_ROOT>/data/.
+SYNC_SRC ?= data/raw/
+SYNC_DIR = $(patsubst data/%,%,$(patsubst %/,%,$(SYNC_SRC)))
+DRY ?=
+DRY_RUN = $(filter 1 true yes,$(DRY))
+SYNC_FLAGS = -az --info=progress2 $(if $(DRY_RUN),--dry-run -v,)
+sync-up:
+	@if [ -z "$(DRY_RUN)" ]; then ssh $(SPRINGFIELD) "mkdir -p $(STORAGE_ROOT)/data/$(SYNC_DIR)"; fi
+	rsync $(SYNC_FLAGS) $(SYNC_SRC) $(SPRINGFIELD):$(STORAGE_ROOT)/data/$(SYNC_DIR)/
+
+
+## Artefacts back from the cluster: <STORAGE_ROOT>/runs/<JOB>/{models,reports}
+# This mirrors into models/ and reports/, so a same-named local file is
+# replaced: the pulled vae.pt overwrites the local one. Back up first if the
+# local checkpoint matters.
+.PHONY: sync-down
+sync-down:
+	@test -n "$(JOB)" || { echo "JOB is empty"; exit 1; }
+	mkdir -p models reports
+	rsync $(SYNC_FLAGS) $(SPRINGFIELD):$(STORAGE_ROOT)/runs/$(JOB)/models/ models/
+	rsync $(SYNC_FLAGS) $(SPRINGFIELD):$(STORAGE_ROOT)/runs/$(JOB)/reports/ reports/
 
 
 ## Render the cluster Job YAML (writes cluster/jobs/<job>.yaml, not committed)
 .PHONY: job
 job:
 	$(PYTHON_INTERPRETER) -m jpas_da.cluster \
-		--image $(IMAGE) --target $(TARGET) --gpu-count $(GPU_COUNT) \
-		--output cluster/jobs/$(TARGET)-$(IMAGE_TAG).yaml
+		--image $(IMAGE) --target $(TARGET) --job-name $(JOB) \
+		--config $(CONFIG) --set '$(SET)' --debug $(DEBUG) \
+		--gpu-count $(GPU_COUNT) --cpu $(CPU) --memory $(MEMORY) \
+		--deadline $(DEADLINE) --storage-root $(STORAGE_ROOT) \
+		--output cluster/jobs/$(JOB).yaml
 
 
-## Submit the rendered Job. Runs on the cluster: only when you ask for it.
+## Submit the rendered Job. Contacting the cluster is only ever explicit.
 .PHONY: submit
 submit: job
-	kubectl apply -f cluster/jobs/$(TARGET)-$(IMAGE_TAG).yaml
+	$(FRINK) run cluster/jobs/$(JOB).yaml
 
 
-## Job and pod state for the current TARGET/IMAGE_TAG
+## Job and pod state for every JOB of this project
 .PHONY: job-status
 job-status:
-	kubectl get jobs,pods -l app=jpas-da
+	$(FRINK) ls
 
 
-## Follow the job's logs
+## Follow the logs of JOB
 .PHONY: job-logs
 job-logs:
-	kubectl logs -f job/$(TARGET)-$(IMAGE_TAG)
+	$(FRINK) logs $(JOB)
 
 
-## Delete the job and its pod
+## Delete JOB and its pod
 .PHONY: job-delete
 job-delete:
-	kubectl delete job $(TARGET)-$(IMAGE_TAG)
+	$(FRINK) rm $(JOB)
 
 
-## Run the smoke path: data, debug training, tests
+## Run the smoke path: debug training plus tests
 .PHONY: smoke
 smoke: train-debug test
+
+
+## Same smoke path in the container, then the CPU smoke Job manifest
+.PHONY: smoke-docker
+smoke-docker: image
+	$(DOCKER) run $(DOCKER_FLAGS) $(IMAGE) make smoke
+	$(MAKE) job TARGET=train-debug GPU_COUNT=0
+
+
+## Cluster-side smoke check: submit the CPU smoke Job and follow its logs
+.PHONY: smoke-cluster
+smoke-cluster:
+	$(MAKE) submit TARGET=train-debug GPU_COUNT=0
+	$(FRINK) logs train-debug-$(IMAGE_TAG)
 
 ## Open the marimo notebook inside the project environment
 .PHONY: notebook
