@@ -2,6 +2,17 @@
 # Every "$" placeholder below comes from a make variable; see the table in README.md.
 # The generated manifest lives in cluster/jobs/ and is not committed.
 #
+# DISCLAIMER: this template encodes Springfield's (UiT) conventions and is not a
+# portable Kubernetes recipe. Before using it on another cluster, check at least:
+#   * the PVC name and mount root        PVC=storage, STORAGE_ROOT=projects/jpas_da
+#   * how jobs are submitted             FRINK=frink (not plain kubectl)
+#   * the GPU resource name and device injection (nvidia.com/gpu + CDI here)
+#   * imagePullPolicy                    PULL_POLICY, and a pull secret if private
+#   * the optional nodeSelector/tolerations at the bottom (Springfield GPU labels)
+# The image itself is portable: `docker run` / `apptainer exec` with
+# /app/{data,models,reports} mounted runs the same make target. Details:
+# references/cluster.md.
+#
 # `namespace:` is dropped when NAMESPACE is empty, so kubectl/frink use the
 # namespace of the current context instead.
 apiVersion: batch/v1

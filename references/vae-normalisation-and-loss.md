@@ -1,8 +1,7 @@
 ---
 title: "miniJPAS fluxes into a VAE: normalisation and loss"
-note: working note, not part of the site
 scope: [normalisation, loss function]
-status: draft
+status: draft, partly superseded
 evidence: every number marked (measured) is reproduced below from data/interim/objects.parquet
 ---
 
@@ -109,16 +108,15 @@ of the total flux inside it depends on the light profile. That is acceptable for
 an SED-shape embedding and unacceptable if the latent is later read as a
 luminosity.
 
-!!! warning "The band axis in this repository is not in one unit"
-    `jpas_da.bands.wavelengths()` returns 378.0 for `J0378` (the filter's name
-    encodes nanometres) but 3497.0 for `uJAVA` and 9316.0 for `J1007`
-    (angstroms), all under the field name `wavelength_aa`. The *ordering* is
-    correct — the sequence is monotonic — so a convolution along the axis is
-    unaffected, but anything that uses the values as a physical wavelength (a
-    kernel width, a redshift stretch, the `wavelength_nm` column in
-    `notebooks/explore_data.py`, which divides by 10 and so plots `J0378` at
-    37.8 nm) is wrong by a factor of 10 for the 54 narrow bands. Fix the unit
-    before using the axis for anything but ordering.
+!!! note "The band axis is in Angstrom (fixed 2026-11-10)"
+    `jpas_da.bands.wavelengths()` returned 378.0 for `J0378` until 2026-11-10:
+    the filter's name encodes nanometres and the value was copied verbatim,
+    while `uJAVA` (3497.0) and `J1007` (9316.0) were already in Angstrom, all
+    under the field name `wavelength_aa`. `_make_band` now multiplies the narrow
+    names by 10, so every one of the 60 bands is in Angstrom and the axis is
+    strictly increasing over the 54 narrow bands (3780 ... 9100). Anything
+    written against the old numbers — a kernel width in nm, a `wavelength_nm`
+    column that divided by 10 — must drop that conversion.
 
 ### Measured on the shipped export
 
@@ -431,7 +429,7 @@ remain a brightness.
 
 ### Why there is no leakage to worry about here, unlike the asinh pipeline
 
-`jpas_da/features.py` implements a different normalisation — `asinh(f/b_j)` with
+`jpas_da/asinh.py` implements a different representation — `asinh(f/b_j)` with
 `b_j = median|sigma_f|` per band — and that one **must** be fitted per fold: `b_j`
 is a sample statistic, so computing it on all four tiles lets the held-out tile
 into the transform (deviation ~0.04–0.07 dex per tile, measured). The RMS norm
@@ -439,7 +437,7 @@ has no such problem. It is per-object, computed from that object's own fluxes
 with no sample statistic anywhere, so it cannot leak across a leave-one-tile-out
 fold and needs no per-fold refitting. That is an argument for this design
 independent of the shape/scale decomposition: it is the only one of the two that
-is trivially correct under the split already in `data/interim/folds.parquet`.
+is trivially correct under the splits in `data/interim/splits.parquet`.
 The fixed constants `floor_frac` and `sig_sys` are calibration numbers from the
 survey, not fitted here, so they do not reintroduce a cross-fold dependence.
 

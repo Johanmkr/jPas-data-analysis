@@ -1,8 +1,14 @@
 # Pipeline v2: data processing and model plan
 
-Agreed 2026-11-06 in a design interview. Claude implements, Johan reviews; one
-commit per task. Tavla: project `jpda`, goals `data`, `euclidean-vae`,
-`eval-harness` (task ids are given per item below).
+Written 2026-11-06 as the design record for the second version of the pipeline:
+what was decided, which measurement drove each decision, and which alternative
+lost. It is the document to read before changing a normalisation constant, a
+split rule or the likelihood.
+
+Task ids in headings (`data-labels`, `vae2-encoder`, ...) refer to the author's
+own task tracker and are kept only so the design notes stay traceable; they have
+no meaning for anyone cloning this repository. Everything needed to reproduce a
+decision is restated here as a measurement with the command that produces it.
 
 This plan supersedes `references/vae-normalisation-and-loss.md` where they
 disagree: the normaliser (Sec. A4), the justification and form of the additive
